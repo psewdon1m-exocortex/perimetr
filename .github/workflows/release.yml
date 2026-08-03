@@ -125,8 +125,10 @@ jobs:
           docker buildx build --tag "${image}:${{ steps.release.outputs.version }}" \
             --tag "${image}:latest" --push --provenance=true --sbom=true \
             --metadata-file image-metadata.json .
+          digest="$(jq -er '."containerimage.digest"' image-metadata.json)"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           echo "reference=$image" >> "$GITHUB_OUTPUT"
-          echo "digest=$(jq -r '.\"containerimage.digest\"' image-metadata.json)" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Build release artifacts
         env:
