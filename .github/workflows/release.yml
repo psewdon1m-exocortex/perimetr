@@ -1,0 +1,158 @@
+name: Release Perimetr
+
+on:
+  push:
+    tags:
+      - "perimetr-v*"
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  UPDATER_REPOSITORY: ${{ vars.UPDATER_REPOSITORY || 'psewdon1m/exocortex-updater' }}
+  POD_REPOSITORY: ${{ vars.POD_REPOSITORY || 'psewdon1m/exocortex-pod' }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements.runtime.txt
+            requirements.dev.txt
+      - uses: sigstore/cosign-installer@v3.10.1
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve version
+        id: release
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#perimetr-v}"
+          [[ "$GITHUB_REF_NAME" == "perimetr-v${version}" ]]
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m alembic -c alembic.ini heads
+          python -m pytest -q
+
+      - name: Download and verify pinned dependencies
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_READ_TOKEN || secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          updater_version="$(tr -d '[:space:]' < .release/updater.version)"
+          pod_version="$(tr -d '[:space:]' < .release/pod.version)"
+          mkdir -p .release-inputs pod-runtime
+          gh release download "updater-v${updater_version}" \
+            --repo "$UPDATER_REPOSITORY" --dir .release-inputs \
+            --pattern "updater-${updater_version}-install.tar.gz" \
+            --pattern "updater-${updater_version}-install.tar.gz.sha256" \
+            --pattern "updater-${updater_version}-install.tar.gz.sigstore.json"
+          (cd .release-inputs && sha256sum -c "updater-${updater_version}-install.tar.gz.sha256")
+          cosign verify-blob \
+            --bundle ".release-inputs/updater-${updater_version}-install.tar.gz.sigstore.json" \
+            --certificate-identity "https://github.com/${UPDATER_REPOSITORY}/.github/workflows/release.yml@refs/tags/updater-v${updater_version}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            ".release-inputs/updater-${updater_version}-install.tar.gz"
+          tar -xzf ".release-inputs/updater-${updater_version}-install.tar.gz" -C .release-inputs
+
+          mkdir -p .release-inputs/pod
+          gh release download "pod-v${pod_version}" \
+            --repo "$POD_REPOSITORY" --dir .release-inputs/pod \
+            --pattern pod.exe --pattern pod.exe.sha256 --pattern pod.exe.sigstore.json \
+            --pattern pod-update-public-key.pem \
+            --pattern pod-update-public-key.pem.sigstore.json
+          (cd .release-inputs/pod && sha256sum -c pod.exe.sha256)
+          cosign verify-blob \
+            --bundle .release-inputs/pod/pod.exe.sigstore.json \
+            --certificate-identity "https://github.com/${POD_REPOSITORY}/.github/workflows/release.yml@refs/tags/pod-v${pod_version}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            .release-inputs/pod/pod.exe
+          cosign verify-blob \
+            --bundle .release-inputs/pod/pod-update-public-key.pem.sigstore.json \
+            --certificate-identity "https://github.com/${POD_REPOSITORY}/.github/workflows/release.yml@refs/tags/pod-v${pod_version}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            .release-inputs/pod/pod-update-public-key.pem
+          cp .release-inputs/pod/pod.exe pod-runtime/pod.exe
+          cp .release-inputs/pod/pod-update-public-key.pem pod-runtime/pod-update-public-key.pem
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and smoke-test image
+        shell: bash
+        run: |
+          image="release-candidate-perimetr:${GITHUB_SHA}"
+          docker buildx build --tag "$image" --load .
+          container="$(docker create "$image")"
+          trap 'docker rm -f "$container" release-smoke-perimetr >/dev/null 2>&1 || true' EXIT
+          test "$(docker export "$container" | tar -xOf - opt/perimetr/pod-runtime/pod.exe | wc -c)" -gt 1000000
+          docker export "$container" | tar -xOf - opt/perimetr/pod-runtime/pod-update-public-key.pem \
+            | grep -q -- 'BEGIN PUBLIC KEY'
+          docker rm "$container"
+          docker run -d --name release-smoke-perimetr \
+            -e PERIMETR_ENV=development \
+            -e PERIMETR_DATABASE_URL=sqlite:////tmp/perimetr-smoke.sqlite \
+            -e KERNEL_URL= -e KERNEL_SERVICE_TOKEN= "$image"
+          for _ in {1..30}; do
+            status="$(docker inspect --format '{{.State.Health.Status}}' release-smoke-perimetr)"
+            [[ "$status" == healthy ]] && break
+            [[ "$status" == unhealthy ]] && docker logs release-smoke-perimetr && exit 1
+            sleep 2
+          done
+          [[ "$(docker inspect --format '{{.State.Health.Status}}' release-smoke-perimetr)" == healthy ]]
+
+      - name: Publish immutable image
+        id: image
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx build --tag "${image}:${{ steps.release.outputs.version }}" \
+            --tag "${image}:latest" --push --provenance=true --sbom=true \
+            --metadata-file image-metadata.json .
+          echo "reference=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$(jq -r '.\"containerimage.digest\"' image-metadata.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Build release artifacts
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        shell: bash
+        run: |
+          updater_version="$(tr -d '[:space:]' < .release/updater.version)"
+          UPDATER_BUNDLE_DIR="$PWD/.release-inputs/updater" \
+          UPDATER_BUNDLE_VERSION="$updater_version" \
+            bash scripts/build-release.sh "${{ steps.release.outputs.version }}"
+
+      - name: Sign artifacts
+        shell: bash
+        run: |
+          find release-artifacts -maxdepth 1 -type f ! -name '*.sigstore.json' -print0 |
+            while IFS= read -r -d '' artifact; do
+              cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+            done
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: "release-artifacts/*"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-artifacts/* \
+            --verify-tag --latest=false --generate-notes \
+            --title "Perimetr ${{ steps.release.outputs.version }}"

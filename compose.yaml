@@ -1,0 +1,65 @@
+name: perimetr
+
+services:
+  perimetr-state-init:
+    image: busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 10001:10001 /state"]
+    volumes:
+      - ./.tmp:/state
+
+  perimetr-api:
+    image: "${PERIMETR_IMAGE:-perimetr-perimetr-api:latest}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PERIMETR_INSTALL_DEV_DEPENDENCIES: "true"
+    command: ["uvicorn", "app.api_service.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "${PERIMETR_LISTEN_PORT:-18080}", "--reload", "--reload-dir", "/app/app"]
+    env_file:
+      - .env
+    environment:
+      KERNEL_CACHE_PATH: /app/.tmp/kernel-cache/register.snapshot.json
+      UPDATER_SOCKET_PATH: /run/exocortex/updater.sock
+    ports:
+      - "${PERIMETR_LISTEN_PORT:-18080}:${PERIMETR_LISTEN_PORT:-18080}"
+    volumes:
+      - ./config:/app/config
+      - ./.docs:/app/.docs
+      - ./.tmp:/app/.tmp
+      - ./app:/app/app
+      - ./tests:/app/tests
+      - ./pod-runtime:/opt/perimetr/pod-runtime:ro
+    depends_on:
+      perimetr-state-init:
+        condition: service_completed_successfully
+      perimetr-db:
+        condition: service_healthy
+      perimetr-cache:
+        condition: service_healthy
+
+  perimetr-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: perimetr
+      POSTGRES_USER: perimetr
+      POSTGRES_PASSWORD: perimetr
+    volumes:
+      - perimetr_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U perimetr -d perimetr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  perimetr-cache:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  perimetr_db_data:

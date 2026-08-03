@@ -1,0 +1,113 @@
+name: perimetr
+
+services:
+  perimetr-state-init:
+    image: busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 10001:10001 /state"]
+    volumes:
+      - perimetr-state:/state
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+
+  perimetr-api:
+    image: "${PERIMETR_IMAGE:?Set PERIMETR_IMAGE in .env}"
+    container_name: exocortex-perimetr
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      KERNEL_CACHE_PATH: /app/.tmp/kernel-cache/register.snapshot.json
+      PERIMETR_COOKIE_SECURE: "${PERIMETR_COOKIE_SECURE:-true}"
+      PERIMETR_ENV: "${PERIMETR_ENV:-production}"
+      PERIMETR_POD_BUNDLE_SOURCE: /opt/perimetr/pod-runtime
+      PERIMETR_POD_CACHE_DIR: /app/.tmp/pod-runtime-cache
+      PERIMETR_POD_UPDATE_PUBLIC_KEY_PATH: /opt/perimetr/pod-runtime/pod-update-public-key.pem
+      UPDATER_SOCKET_PATH: /run/exocortex/updater.sock
+    ports:
+      - "127.0.0.1:${PERIMETR_LISTEN_PORT:-18080}:${PERIMETR_LISTEN_PORT:-18080}"
+    volumes:
+      - perimetr-state:/app/.tmp
+      - type: bind
+        source: "${UPDATER_SOCKET_DIR:-/run/exocortex}"
+        target: /run/exocortex
+    group_add:
+      - "${UPDATER_SOCKET_GID:?Set UPDATER_SOCKET_GID during VPS installation}"
+    depends_on:
+      perimetr-state-init:
+        condition: service_completed_successfully
+      perimetr-db:
+        condition: service_healthy
+      perimetr-cache:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  perimetr-db:
+    image: postgres@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: perimetr
+      POSTGRES_USER: perimetr
+      POSTGRES_PASSWORD: "${PERIMETR_POSTGRES_PASSWORD:?Set PERIMETR_POSTGRES_PASSWORD in .env}"
+    volumes:
+      - perimetr_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U perimetr -d perimetr"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  perimetr-cache:
+    image: redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    read_only: true
+    tmpfs:
+      - /data:size=32m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  perimetr_db_data:
+  perimetr-state:

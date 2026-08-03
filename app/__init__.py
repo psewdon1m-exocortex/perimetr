@@ -1,0 +1,1 @@
+"""PERIMETR core application package."""
