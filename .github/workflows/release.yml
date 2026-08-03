@@ -12,8 +12,8 @@ permissions:
   attestations: write
 
 env:
-  UPDATER_REPOSITORY: ${{ vars.UPDATER_REPOSITORY || 'psewdon1m/exocortex-updater' }}
-  POD_REPOSITORY: ${{ vars.POD_REPOSITORY || 'psewdon1m/exocortex-pod' }}
+  UPDATER_REPOSITORY: ${{ vars.UPDATER_REPOSITORY || 'psewdon1m-exocortex/updater' }}
+  POD_REPOSITORY: ${{ vars.POD_REPOSITORY || 'psewdon1m-exocortex/pod' }}
 
 jobs:
   release:
