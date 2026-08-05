@@ -99,12 +99,27 @@ jobs:
         run: |
           image="release-candidate-perimetr:${GITHUB_SHA}"
           docker buildx build --tag "$image" --load .
+          cp .env.example .env
+          cache_project="release-smoke-perimetr-cache"
           container="$(docker create "$image")"
-          trap 'docker rm -f "$container" release-smoke-perimetr >/dev/null 2>&1 || true' EXIT
+          trap 'docker compose -p "$cache_project" --env-file .env -f compose.production.yaml down -v >/dev/null 2>&1 || true; docker rm -f "$container" release-smoke-perimetr >/dev/null 2>&1 || true; rm -f .env' EXIT
           test "$(docker export "$container" | tar -xOf - opt/perimetr/pod-runtime/pod.exe | wc -c)" -gt 1000000
           docker export "$container" | tar -xOf - opt/perimetr/pod-runtime/pod-update-public-key.pem \
             | grep -q -- 'BEGIN PUBLIC KEY'
           docker rm "$container"
+          PERIMETR_IMAGE="$image" UPDATER_SOCKET_GID="$(id -g)" \
+            docker compose -p "$cache_project" --env-file .env -f compose.production.yaml \
+              up -d perimetr-cache
+          cache_container="$(docker compose -p "$cache_project" --env-file .env \
+            -f compose.production.yaml ps -q perimetr-cache)"
+          for _ in {1..15}; do
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$cache_container")"
+            [[ "$status" == healthy ]] && break
+            [[ "$status" == unhealthy ]] && docker logs "$cache_container" && exit 1
+            sleep 2
+          done
+          [[ "$(docker inspect --format '{{.State.Health.Status}}' "$cache_container")" == healthy ]]
+          docker compose -p "$cache_project" --env-file .env -f compose.production.yaml down -v
           docker run -d --name release-smoke-perimetr \
             -e PERIMETR_ENV=development \
             -e PERIMETR_DATABASE_URL=sqlite:////tmp/perimetr-smoke.sqlite \

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.1.2
+
+- Run the pinned production Redis cache as its non-root image user and assign
+  the ephemeral `/data` tmpfs to that user, preserving `cap_drop: ALL` without
+  blocking the Redis entrypoint.
+- Smoke-test the hardened production Redis service in the release workflow.
+
 ## 1.1.1
 
 - Resolve the newest signed stable Pod release from Kernel Register
