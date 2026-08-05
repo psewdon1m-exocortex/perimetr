@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.0
+
+- Add the one-command Perimetr bootstrap and `perimetr-install` production command.
+- Generate database, Pod and updater secrets without generating operator credentials.
+- Use checksummed release dependencies without Cosign/Sigstore bundles.
+
 ## 1.1.3
 
 - Make the Redis `/data` tmpfs writable through a portable sticky mode instead

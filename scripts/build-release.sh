@@ -28,11 +28,14 @@ mkdir -p "$root/$output"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cp "$root/compose.yaml" "$root/compose.production.yaml" "$root/.env.example" \
-  "$root/install.sh" "$stage/"
+  "$root/install.sh" "$root/bootstrap.sh" "$stage/"
 cp -R "$updater_dir" "$stage/updater"
 find "$stage/updater" -type f -name '*.sh' -exec chmod 0755 {} +
-chmod 0755 "$stage/install.sh" "$stage/updater/updater-linux-amd64" \
-  "$stage/updater/cosign-linux-amd64"
+chmod 0755 "$stage/install.sh" "$stage/bootstrap.sh" "$stage/updater/updater-linux-amd64"
+sed -i \
+  -e "s|^PERIMETR_VERSION=.*|PERIMETR_VERSION=$version|" \
+  -e "s|^PERIMETR_IMAGE=.*|PERIMETR_IMAGE=${image_reference}@${image_digest}|" \
+  "$stage/.env.example"
 
 bundle="$root/$output/perimetr-${version}-compose.tar.gz"
 tar -czf "$bundle" -C "$stage" .

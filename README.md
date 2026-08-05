@@ -2,6 +2,26 @@
 
 This folder contains the active core application.
 
+## Production installation
+
+Prepare the latest stable release without starting it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/psewdon1m-exocortex/perimetr/main/bootstrap.sh | sudo sh
+```
+
+Edit only the `OPERATOR INPUT` section in `/opt/exocortex/perimetr/.env`, then
+run:
+
+```bash
+sudo perimetr-install
+```
+
+The bootstrap generates PostgreSQL, Pod and updater secrets, but never the
+operator username or password. On a shared Kernel/Perimetr VPS it also copies
+the local Kernel URL and service token when available. Nginx, certificates,
+DNS and firewall policy remain separate Sindri operations.
+
 ## Run
 
 ```powershell

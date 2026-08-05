@@ -6,7 +6,7 @@ from .kernel_register import apply_register
 
 
 class Settings(BaseSettings):
-    perimetr_version: str = "1.1.3"
+    perimetr_version: str = "1.2.0"
     perimetr_env: str = "development"
     perimetr_host: str = "0.0.0.0"
     perimetr_repository_url: str = ""

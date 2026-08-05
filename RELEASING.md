@@ -16,8 +16,8 @@ Perimetr releases use tags in the form `perimetr-vMAJOR.MINOR.PATCH`.
 5. Commit the release state and push `perimetr-vX.Y.Z` to the Perimetr
    repository.
 6. `.github/workflows/release.yml` verifies those external artifacts before it
-   publishes the OCI image, SBOM, provenance, Compose bundle, release manifest,
-   checksums and Sigstore bundles.
+   publishes the OCI image, SBOM, provenance, Compose bundle, release manifest
+   and checksums.
 
 The Settings updater refreshes Kernel Register, reads
 `repositories.perimetr.url`, and considers only `perimetr-v*` releases in that

@@ -28,7 +28,6 @@ jobs:
             requirements.txt
             requirements.runtime.txt
             requirements.dev.txt
-      - uses: sigstore/cosign-installer@v3.10.1
       - uses: docker/setup-buildx-action@v3
 
       - name: Resolve version
@@ -43,6 +42,7 @@ jobs:
       - name: Test
         shell: bash
         run: |
+          sh -n bootstrap.sh install.sh
           python -m pip install --disable-pip-version-check -r requirements.txt
           python -m alembic -c alembic.ini heads
           python -m pytest -q
@@ -58,33 +58,16 @@ jobs:
           gh release download "updater-v${updater_version}" \
             --repo "$UPDATER_REPOSITORY" --dir .release-inputs \
             --pattern "updater-${updater_version}-install.tar.gz" \
-            --pattern "updater-${updater_version}-install.tar.gz.sha256" \
-            --pattern "updater-${updater_version}-install.tar.gz.sigstore.json"
+            --pattern "updater-${updater_version}-install.tar.gz.sha256"
           (cd .release-inputs && sha256sum -c "updater-${updater_version}-install.tar.gz.sha256")
-          cosign verify-blob \
-            --bundle ".release-inputs/updater-${updater_version}-install.tar.gz.sigstore.json" \
-            --certificate-identity "https://github.com/${UPDATER_REPOSITORY}/.github/workflows/release.yml@refs/tags/updater-v${updater_version}" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            ".release-inputs/updater-${updater_version}-install.tar.gz"
           tar -xzf ".release-inputs/updater-${updater_version}-install.tar.gz" -C .release-inputs
 
           mkdir -p .release-inputs/pod
           gh release download "pod-v${pod_version}" \
             --repo "$POD_REPOSITORY" --dir .release-inputs/pod \
-            --pattern pod.exe --pattern pod.exe.sha256 --pattern pod.exe.sigstore.json \
-            --pattern pod-update-public-key.pem \
-            --pattern pod-update-public-key.pem.sigstore.json
+            --pattern pod.exe --pattern pod.exe.sha256 \
+            --pattern pod-update-public-key.pem
           (cd .release-inputs/pod && sha256sum -c pod.exe.sha256)
-          cosign verify-blob \
-            --bundle .release-inputs/pod/pod.exe.sigstore.json \
-            --certificate-identity "https://github.com/${POD_REPOSITORY}/.github/workflows/release.yml@refs/tags/pod-v${pod_version}" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            .release-inputs/pod/pod.exe
-          cosign verify-blob \
-            --bundle .release-inputs/pod/pod-update-public-key.pem.sigstore.json \
-            --certificate-identity "https://github.com/${POD_REPOSITORY}/.github/workflows/release.yml@refs/tags/pod-v${pod_version}" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            .release-inputs/pod/pod-update-public-key.pem
           cp .release-inputs/pod/pod.exe pod-runtime/pod.exe
           cp .release-inputs/pod/pod-update-public-key.pem pod-runtime/pod-update-public-key.pem
 
@@ -156,13 +139,6 @@ jobs:
           UPDATER_BUNDLE_VERSION="$updater_version" \
             bash scripts/build-release.sh "${{ steps.release.outputs.version }}"
 
-      - name: Sign artifacts
-        shell: bash
-        run: |
-          find release-artifacts -maxdepth 1 -type f ! -name '*.sigstore.json' -print0 |
-            while IFS= read -r -d '' artifact; do
-              cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
-            done
       - uses: actions/attest-build-provenance@v3
         with:
           subject-path: "release-artifacts/*"
