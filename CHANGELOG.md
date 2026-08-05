@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.1.3
+
+- Make the Redis `/data` tmpfs writable through a portable sticky mode instead
+  of Docker Engine-specific tmpfs `uid` and `gid` mount options.
+
 ## 1.1.2
 
 - Run the pinned production Redis cache as its non-root image user and assign
