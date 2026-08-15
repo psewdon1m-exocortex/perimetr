@@ -121,6 +121,9 @@ from ..pod_service import (
     heartbeat_signing_bytes,
     issue_enrollment_token,
     issue_identity_certificate,
+    issue_pod_access_grant,
+    pod_access_mode,
+    pod_config_for_access,
     pod_payload,
     pod_executable_name,
     provisioning_expiry,
@@ -130,7 +133,7 @@ from ..pod_service import (
     validate_subject_pod_config,
     validate_vless_uri,
     verify_heartbeat_signature,
-    verify_pod_password,
+    verify_pod_access_grant,
 )
 from ..pod_artifacts import (
     PodArtifactError,
@@ -1370,7 +1373,15 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/subjects", response_model=SubjectRead, status_code=201)
     def create_subject(payload: SubjectCreate, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> Subject:
-        obj = get_object(db, payload.object_id)
+        try:
+            obj = get_object(db, payload.object_id)
+        except HTTPException as exc:
+            existing = db.get(Subject, payload.object_id) or db.scalar(
+                select(Subject).where(Subject.entity_id == payload.object_id)
+            )
+            if existing is not None:
+                return existing
+            raise exc
         legacy_subjects = db.scalars(select(Subject).where(Subject.object_id == obj.id)).all()
         for legacy in legacy_subjects:
             legacy.object_id = None
@@ -1561,6 +1572,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="pod_login_required")
         if payload.password != payload.confirm_password:
             raise HTTPException(status_code=400, detail="pod_password_confirmation_mismatch")
+        decoy_password = payload.decoy_password or ""
+        confirm_decoy_password = payload.confirm_decoy_password or ""
+        if bool(decoy_password) != bool(confirm_decoy_password):
+            raise HTTPException(status_code=400, detail="pod_decoy_password_confirmation_required")
+        if decoy_password != confirm_decoy_password:
+            raise HTTPException(status_code=400, detail="pod_decoy_password_confirmation_mismatch")
+        if decoy_password and secrets.compare_digest(decoy_password, payload.password):
+            raise HTTPException(status_code=400, detail="pod_decoy_password_must_differ")
         try:
             artifact = ensure_latest_pod_artifact(settings, force=True)
         except PodArtifactError as exc:
@@ -1569,12 +1588,14 @@ def create_app() -> FastAPI:
                 detail=f"pod_runtime_unavailable: {exc}",
             ) from exc
         password_hash = hash_pod_password(payload.password)
+        decoy_password_hash = hash_pod_password(decoy_password) if decoy_password else ""
         _, token_hash, encrypted_token = issue_enrollment_token(settings)
         record = PodProvisioningRecord(
             subject_id=subject.id,
             name=login,
             login=login,
             password_hash=password_hash,
+            decoy_password_hash=decoy_password_hash,
             status="ready_to_download",
             enrollment_token_hash=token_hash,
             enrollment_token_encrypted=encrypted_token,
@@ -1928,6 +1949,7 @@ def create_app() -> FastAPI:
         record = None
         credential_login = ""
         credential_hash = ""
+        decoy_credential_hash = ""
         if payload.provisioning_id:
             record = db.get(PodProvisioningRecord, payload.provisioning_id)
             if record is None or not payload.enrollment_token:
@@ -1944,20 +1966,31 @@ def create_app() -> FastAPI:
             subject = db.get(Subject, record.subject_id)
             credential_login = record.login
             credential_hash = record.password_hash
+            decoy_credential_hash = record.decoy_password_hash
         elif payload.clone_from_pod_id:
             previous = get_pod(db, payload.clone_from_pod_id)
             subject = previous.subject
             credential_login = previous.login
             credential_hash = previous.password_hash
+            decoy_credential_hash = previous.decoy_password_hash
         else:
             raise HTTPException(status_code=400, detail="provisioning_or_clone_source_required")
         if subject is None:
             raise HTTPException(status_code=404, detail="subject_not_found")
+        access_mode = None
         if credential_hash:
-            credentials_valid = secrets.compare_digest(payload.username, credential_login) and verify_pod_password(payload.password, credential_hash)
+            access_mode = pod_access_mode(
+                username=payload.username,
+                password=payload.password,
+                login=credential_login,
+                password_hash=credential_hash,
+                decoy_password_hash=decoy_credential_hash,
+            )
+            credentials_valid = access_mode is not None
         else:
             credentials_valid = verify_direct_login(db, settings, target="perimetr", username=payload.username, password=payload.password)
             if credentials_valid:
+                access_mode = "primary"
                 credential_login = payload.username
                 credential_hash = hash_pod_password(payload.password)
         if not credentials_valid:
@@ -1987,6 +2020,7 @@ def create_app() -> FastAPI:
             name=credential_login,
             login=credential_login,
             password_hash=credential_hash,
+            decoy_password_hash=decoy_credential_hash,
             status="offline",
             host_id=payload.host_id,
             path="state/profile",
@@ -2018,8 +2052,10 @@ def create_app() -> FastAPI:
             "subject_id": subject.entity_id,
             "identity_certificate": pod.identity_certificate,
             "status": pod.status,
+            "access_mode": access_mode,
+            "access_grant": issue_pod_access_grant(pod.id, access_mode or "primary", settings),
             "next_heartbeat_sequence": 1,
-            "config": subject_pod_config(subject, settings),
+            "config": pod_config_for_access(subject, settings, access_mode or "primary"),
         }
 
     @app.get("/v1/pods")
@@ -2095,11 +2131,20 @@ def create_app() -> FastAPI:
         pod = get_pod(db, pod_id)
         if pod.status == "revoked" or db.scalar(select(PodDenylist).where(PodDenylist.identifier_type == "pod_id", PodDenylist.identifier_value == pod.id)):
             raise HTTPException(status_code=403, detail="pod_revoked")
+        access_mode = None
         if pod.password_hash:
-            credentials_valid = secrets.compare_digest(payload.username, pod.login) and verify_pod_password(payload.password, pod.password_hash)
+            access_mode = pod_access_mode(
+                username=payload.username,
+                password=payload.password,
+                login=pod.login,
+                password_hash=pod.password_hash,
+                decoy_password_hash=pod.decoy_password_hash,
+            )
+            credentials_valid = access_mode is not None
         else:
             credentials_valid = verify_direct_login(db, get_settings(), target="perimetr", username=payload.username, password=payload.password)
             if credentials_valid:
+                access_mode = "primary"
                 pod.login = payload.username
                 pod.name = payload.username
                 pod.password_hash = hash_pod_password(payload.password)
@@ -2107,7 +2152,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="invalid_credentials")
         audit(db, actor_type="pod_user", actor_id=payload.username, action="pod.access.verified", target_type="pod", target_id=pod.id)
         db.commit()
-        return {"allowed": True, "status": pod.status, "next_heartbeat_sequence": pod.heartbeat_sequence + 1, "config": subject_pod_config(pod.subject, get_settings())}
+        return {
+            "allowed": True,
+            "status": pod.status,
+            "access_mode": access_mode,
+            "access_grant": issue_pod_access_grant(pod.id, access_mode or "primary", get_settings()),
+            "next_heartbeat_sequence": pod.heartbeat_sequence + 1,
+            "config": pod_config_for_access(pod.subject, get_settings(), access_mode or "primary"),
+        }
 
     @app.post("/v1/pods/{pod_id}/status")
     def read_pod_runtime_status(pod_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
@@ -2177,6 +2229,13 @@ def create_app() -> FastAPI:
         # Verify the exact wire representation. Re-serializing a parsed timestamp
         # can expand milliseconds to microseconds and invalidate a correct signature.
         verify_heartbeat_signature(pod.public_key_pem, payload, heartbeat.signature)
+        if heartbeat.access_grant:
+            access_mode = verify_pod_access_grant(heartbeat.access_grant, pod.id, get_settings())
+        elif pod.decoy_password_hash:
+            raise HTTPException(status_code=403, detail="pod_access_grant_required")
+        else:
+            # Backward compatibility for Pods created before decoy credentials existed.
+            access_mode = "primary"
         previous_network_status = (pod.runtime_state or {}).get("network_status")
         pod.heartbeat_sequence = heartbeat.sequence
         pod.status = "active"
@@ -2200,7 +2259,7 @@ def create_app() -> FastAPI:
             "allowed": True,
             "status": pod.status,
             "lease_seconds": get_settings().perimetr_pod_offline_after_sec,
-            "config": subject_pod_config(pod.subject, get_settings()),
+            "config": pod_config_for_access(pod.subject, get_settings(), access_mode),
         }
 
     @app.delete("/v1/pods/{pod_id}")

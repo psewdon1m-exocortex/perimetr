@@ -127,6 +127,7 @@ def build_backup_payload(*, entity_type: str, entity_id: str, db: Session) -> di
             "name": item.name,
             "login": item.login,
             "password_hash": item.password_hash,
+            "decoy_password_hash": item.decoy_password_hash,
             "status": item.status,
             "public_key_pem": item.public_key_pem,
             "identity_certificate": item.identity_certificate,
@@ -267,7 +268,7 @@ def build_backup_payload(*, entity_type: str, entity_id: str, db: Session) -> di
             "subjects": [subject_dump(item) for item in all_subjects],
             "pods": [pod_dump(item) for item in all_pods],
             "pod_provisioning_records": [
-                simple_dump(item, "subject_id", "name", "login", "password_hash", "status", "enrollment_token_hash", "enrollment_token_encrypted", "bundle_version", "artifact_sha256", "download_count", "downloaded_at", "expires_at", "activated_at", "revoked_at", "metadata_json")
+                simple_dump(item, "subject_id", "name", "login", "password_hash", "decoy_password_hash", "status", "enrollment_token_hash", "enrollment_token_encrypted", "bundle_version", "artifact_sha256", "download_count", "downloaded_at", "expires_at", "activated_at", "revoked_at", "metadata_json")
                 for item in all_pod_provisioning
             ],
             "pod_denylist": [
@@ -462,7 +463,7 @@ async def import_backup_bundle(*, archive, db: Session) -> dict:
         )
         if db.get(PodProvisioningRecord, payload["id"]) is None:
             db.add(record)
-        for field in ("subject_id", "name", "login", "password_hash", "status", "enrollment_token_hash", "enrollment_token_encrypted", "bundle_version", "artifact_sha256", "download_count", "metadata_json"):
+        for field in ("subject_id", "name", "login", "password_hash", "decoy_password_hash", "status", "enrollment_token_hash", "enrollment_token_encrypted", "bundle_version", "artifact_sha256", "download_count", "metadata_json"):
             setattr(record, field, payload.get(field, getattr(record, field)))
         for field in ("downloaded_at", "expires_at", "activated_at", "revoked_at"):
             setattr(record, field, parse_datetime(payload.get(field)))
@@ -489,6 +490,7 @@ async def import_backup_bundle(*, archive, db: Session) -> dict:
             "name": "Pod",
             "login": "pod",
             "password_hash": "",
+            "decoy_password_hash": "",
             "status": "pending",
             "public_key_pem": "",
             "identity_certificate": "",

@@ -171,6 +171,11 @@ def test_direct_login_and_core_shell(monkeypatch) -> None:
         assert "Download Pod" not in shell.text
         assert 'download.click()' in shell.text
         assert 'id="newPodLogin"' in shell.text
+        assert 'id="newPodDecoyPassword"' in shell.text
+        assert 'id="projectCreateModalBackdrop"' in shell.text
+        assert 'id="newProjectName"' in shell.text
+        assert 'window.prompt("Project name")' not in shell.text
+        assert "Proxy connection saved automatically." in shell.text
         assert 'target.matches(".modal-backdrop.open")' in shell.text
         assert "--line-mid: color-mix(in srgb, var(--light) 75%, transparent)" in shell.text
         assert "--line-outer: var(--light)" in shell.text
@@ -593,6 +598,12 @@ def test_object_subject_web_runtime_flow() -> None:
         assert created_subject.json()["name"] == "Mail Workspace Renamed"
         assert "status" not in created_subject.json()
         assert "field" not in created_subject.json()
+        repeated_conversion = client.post(
+            "/v1/subjects",
+            json={"object_id": object_id, "runtime_type": "web"},
+        )
+        assert repeated_conversion.status_code == 201
+        assert repeated_conversion.json()["id"] == subject_id
         assert all(item["id"] != object_id for item in client.get("/v1/objects").json())
         assert any(item["id"] == object_id for item in client.get("/v1/subjects").json())
         correlation = client.get("/v1/correlation").json()
@@ -677,10 +688,19 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
         assert configured.json()["vless_connection"] == vless_uri
         assert configured.json()["network_profile_version"] == 2
 
-        provisioned = client.post(f"/v1/subjects/{subject_id}/pods", json={"login": "designer", "password": "designer-password", "confirm_password": "designer-password"})
+        provisioned = client.post(
+            f"/v1/subjects/{subject_id}/pods",
+            json={
+                "login": "designer",
+                "password": "designer-password",
+                "confirm_password": "designer-password",
+                "decoy_password": "designer-decoy-password",
+                "confirm_decoy_password": "designer-decoy-password",
+            },
+        )
         assert provisioned.status_code == 201
         assert provisioned.json()["login"] == "designer"
-        assert provisioned.json()["bundle_version"] == "0.1.2"
+        assert provisioned.json()["bundle_version"] == "0.1.3"
         assert re.fullmatch(r"[a-f0-9]{64}", provisioned.json()["artifact_sha256"])
         assert provisioned.json()["runtime_source"] in {"factory", "last-known-good"}
         provisioning_id = provisioned.json()["id"]
@@ -725,9 +745,21 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
         )
         assert enrolled.status_code == 201
         pod_id = enrolled.json()["pod_id"]
+        assert enrolled.json()["access_mode"] == "primary"
         assert enrolled.json()["config"]["vless_connection"] == vless_uri
         assert client.post(f"/v1/pods/{pod_id}/verify", json={"username": "designer", "password": "wrong"}).status_code == 403
-        assert client.post(f"/v1/pods/{pod_id}/verify", json={"username": "designer", "password": "designer-password"}).status_code == 200
+        primary_access = client.post(f"/v1/pods/{pod_id}/verify", json={"username": "designer", "password": "designer-password"})
+        assert primary_access.status_code == 200
+        assert primary_access.json()["access_mode"] == "primary"
+        assert primary_access.json()["access_grant"]
+        assert primary_access.json()["config"]["system_tabs"][0]["id"] == "site"
+        decoy_access = client.post(f"/v1/pods/{pod_id}/verify", json={"username": "designer", "password": "designer-decoy-password"})
+        assert decoy_access.status_code == 200
+        assert decoy_access.json()["access_mode"] == "decoy"
+        assert decoy_access.json()["access_grant"]
+        assert decoy_access.json()["config"]["subject"] == {"id": "", "name": "Pod"}
+        assert decoy_access.json()["config"]["system_tabs"] == []
+        assert decoy_access.json()["config"]["default_navigation_url"] == "https://www.google.com/"
         changed_password = client.put(f"/v1/pods/{pod_id}/password", json={"new_password": "designer-password-2", "confirm_password": "designer-password-2"})
         assert changed_password.status_code == 200
         assert client.post(f"/v1/pods/{pod_id}/verify", json={"username": "designer", "password": "designer-password"}).status_code == 403
@@ -743,6 +775,9 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
             "proxy_engine": "xray-core",
             "xray_version": "25.6.8",
             "network_status": "proxy_verified",
+            # The client-provided mode is not authoritative; the signed grant is.
+            "access_mode": "primary",
+            "access_grant": decoy_access.json()["access_grant"],
             "temporary_tabs_count": 1,
         }
         # Heartbeats are time-bound; use a current timestamp after retaining deterministic field ordering.
@@ -751,6 +786,8 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
         accepted = client.post(f"/v1/pods/{pod_id}/heartbeat", json=heartbeat)
         assert accepted.status_code == 200
         assert accepted.json()["allowed"] is True
+        assert accepted.json()["config"]["system_tabs"] == []
+        assert accepted.json()["config"]["default_navigation_url"] == "https://www.google.com/"
         assert any(item["id"] == pod_id and item["subject_name"] == "Pod Subject" for item in client.get("/v1/pods").json())
         assert any(item["action"] == "pod.session.opened" and item["target_id"] == pod_id for item in client.get("/v1/audit").json())
         assert client.post(f"/v1/pods/{pod_id}/heartbeat", json=heartbeat).status_code == 409
@@ -814,7 +851,9 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
             backed_up_pod = next(item for item in backed_up_pods if item["id"] == pod_id)
             assert backed_up_pod["login"] == "designer"
             assert backed_up_pod["password_hash"].startswith("pbkdf2_sha256$")
+            assert backed_up_pod["decoy_password_hash"].startswith("pbkdf2_sha256$")
             assert b"designer-password-2" not in archive.content
+            assert b"designer-decoy-password" not in archive.content
 
 
 def test_agent_command_queue_still_available() -> None:

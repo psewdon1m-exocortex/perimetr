@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.1 - 2026-08-15
+
+- Replace the browser Project prompt with the Perimetr modal workflow.
+- Make Object-to-Subject conversion idempotent and prevent duplicate UI requests.
+- Automatically save Subject VLESS changes with success feedback.
+- Add optional server-authorized Pod decoy passwords and clean Google-only sessions.
+- Pin the factory Pod runtime to version 0.1.3.
+
 ## 1.2.0
 
 - Add the one-command Perimetr bootstrap and `perimetr-install` production command.

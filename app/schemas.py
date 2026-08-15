@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -234,6 +234,8 @@ class PodProvisioningCreate(BaseModel):
     login: str
     password: str
     confirm_password: str
+    decoy_password: str | None = None
+    confirm_decoy_password: str | None = None
 
 
 class PodProvisioningRead(BaseModel):
@@ -274,6 +276,8 @@ class PodEnrollRead(BaseModel):
     subject_id: str
     identity_certificate: str
     status: str
+    access_mode: Literal["primary", "decoy"] = "primary"
+    access_grant: str
     next_heartbeat_sequence: int = 1
     config: dict[str, Any]
 
@@ -288,6 +292,8 @@ class PodSignedHeartbeatRequest(BaseModel):
     proxy_engine: str = "xray-core"
     xray_version: str = "unknown"
     network_status: str = "unknown"
+    access_mode: Literal["primary", "decoy"] = "primary"
+    access_grant: str = ""
     temporary_tabs_count: int = 0
     signature: str
 

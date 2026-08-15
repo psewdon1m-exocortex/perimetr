@@ -72,6 +72,64 @@ def verify_pod_password(value: str, stored: str) -> bool:
         return False
 
 
+def pod_access_mode(
+    *,
+    username: str,
+    password: str,
+    login: str,
+    password_hash: str,
+    decoy_password_hash: str = "",
+) -> str | None:
+    if not secrets.compare_digest(username, login):
+        return None
+    if password_hash and verify_pod_password(password, password_hash):
+        return "primary"
+    if decoy_password_hash and verify_pod_password(password, decoy_password_hash):
+        return "decoy"
+    return None
+
+
+def issue_pod_access_grant(pod_id: str, access_mode: str, settings: Settings) -> str:
+    if access_mode not in {"primary", "decoy"}:
+        raise HTTPException(status_code=500, detail="invalid_pod_access_mode")
+    grant = {
+        "version": 1,
+        "pod_id": pod_id,
+        "access_mode": access_mode,
+        "nonce": secrets.token_urlsafe(16),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(grant, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    signature = hmac.new(
+        settings.perimetr_pod_signing_secret.encode("utf-8"),
+        encoded.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def verify_pod_access_grant(token: str, pod_id: str, settings: Settings) -> str:
+    try:
+        encoded, supplied_signature = token.split(".", 1)
+        expected_signature = hmac.new(
+            settings.perimetr_pod_signing_secret.encode("utf-8"),
+            encoded.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            raise ValueError("signature mismatch")
+        grant = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")))
+        if grant.get("version") != 1 or not secrets.compare_digest(str(grant.get("pod_id") or ""), pod_id):
+            raise ValueError("grant mismatch")
+        access_mode = str(grant.get("access_mode") or "")
+        if access_mode not in {"primary", "decoy"}:
+            raise ValueError("invalid mode")
+        return access_mode
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=403, detail="invalid_pod_access_grant") from exc
+
+
 def pod_executable_name(login: str) -> str:
     candidate = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", login.strip()).strip(" .")
     candidate = re.sub(r"\s+", " ", candidate)[:80].strip(" .") or "pod"
@@ -155,6 +213,20 @@ def subject_pod_config(subject: Subject, settings: Settings) -> dict:
         "security_policy": security_policy,
         "minimum_pod_version": settings.perimetr_pod_version,
         "default_navigation_url": settings.perimetr_default_pod_url,
+    }
+
+
+def pod_config_for_access(subject: Subject, settings: Settings, access_mode: str) -> dict:
+    config = subject_pod_config(subject, settings)
+    if access_mode != "decoy":
+        return config
+    return {
+        **config,
+        "subject": {"id": "", "name": "Pod"},
+        "system_tabs": [],
+        "system_tabs_profile_version": 0,
+        "ui_policy": {},
+        "default_navigation_url": "https://www.google.com/",
     }
 
 

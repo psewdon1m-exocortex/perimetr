@@ -1505,10 +1505,10 @@ docker compose up -d --build</pre>
           <article id="docs-pods" data-doc-title="Pods create unlock VLESS tabs required update channel revoke portable">
             <h2>Pods</h2>
             <h3>Configure A Subject</h3>
-            <ol><li>Enter one valid VLESS connection in <code>Subject Network</code>.</li><li>Add System Tabs with a title and HTTPS URL.</li><li>Mark a tab Required only when it must remain open for the entire session.</li><li>Select Stable for production manifests or Beta for prerelease manifests.</li></ol>
+            <ol><li>Enter one valid VLESS connection in <code>Subject Network</code>. It saves automatically after typing stops and a green notice confirms the saved value.</li><li>Add System Tabs with a title and HTTPS URL.</li><li>Mark a tab Required only when it must remain open for the entire session.</li><li>Select Stable for production manifests or Beta for prerelease manifests.</li></ol>
             <p>For a VPS installation, publish the correct <code>services.perimetr.sni</code> and <code>services.perimetr.port</code> in Kernel Register before creating a Pod. Perimetr derives its public HTTPS endpoint and embeds it in the bootstrap. The SNI inside the VLESS URI belongs to the proxy server and is independent from the Perimetr API hostname.</p>
             <h3>Create And Activate</h3>
-            <ol><li>Select <code>Create Pod</code>, enter a unique login and a strong password, then confirm.</li><li>Perimetr reads <code>repositories.pod.url</code> from Kernel, checks the signed <code>pod-current</code> manifest and pins the exact version and SHA-256 to this provisioning record.</li><li>Extract the downloaded ZIP completely. Do not move only the EXE away from its <code>state</code> directory.</li><li>Run the login-named EXE and enter the same credentials.</li><li>Wait for <code>Proxy verified</code>. System Tabs then open through the Subject proxy.</li></ol>
+            <ol><li>Select <code>Create Pod</code>, enter a unique login and a strong primary password, then confirm it.</li><li>Optionally enter and confirm a different Decoy Password. It opens only Google Search in an isolated temporary profile; it never opens Subject System Tabs or their persistent cookies.</li><li>Perimetr reads <code>repositories.pod.url</code> from Kernel, checks the signed <code>pod-current</code> manifest and pins the exact version and SHA-256 to this provisioning record.</li><li>Extract the downloaded ZIP completely. Do not move only the EXE away from its <code>state</code> directory.</li><li>Run the login-named EXE and enter the intended credentials.</li><li>Wait for <code>Proxy verified</code>. The selected access mode then opens through the Subject proxy.</li></ol>
             <div class="documentation-note">If Kernel or the Pod repository is temporarily unavailable, Perimetr uses its verified last-known-good artifact. A factory runtime embedded in the Perimetr image is the cold-start fallback. Invalid signatures, checksum mismatches and version downgrades never replace the cache.</div>
             <p>The delivered portable is normally close to 100 MB. The roughly 430 MB unpacked Electron directory is a build-time diagnostic artifact and is not included in Pod downloads.</p>
             <p>Successful activation writes <code>pod.enrolled</code>; every successful open writes <code>pod.session.opened</code>; ongoing connectivity writes signed <code>pod.heartbeat</code> events to Logger.</p>
@@ -1536,12 +1536,13 @@ curl http://localhost:18080/v1/health
 # Container-side test suite
 docker compose exec -T perimetr-api python -m pytest -q</pre>
           </article>
-          <article id="docs-troubleshooting" data-doc-title="Troubleshooting Pod unlock containers logs errors">
+          <article id="docs-troubleshooting" data-doc-title="Troubleshooting Pod unlock containers logs errors service verification trust">
             <h2>Troubleshooting</h2>
             <h3>Perimetr Does Not Open</h3><pre>docker compose ps
 docker compose logs --tail=200 perimetr-api</pre>
             <h3>Pod Stays Locked</h3><ul><li>Confirm that the Pod was fully extracted and its <code>state/config/bootstrap.json</code> exists.</li><li>Confirm that <code>PERIMETR_PUBLIC_URL</code> is reachable from the device.</li><li>Check the Pod <code>logs/pod.jsonl</code> file beside the executable.</li><li>Verify the Subject VLESS route independently.</li></ul>
             <h3>A System Tab Cannot Load</h3><p>A website navigation failure is isolated to that tab and no longer revokes a valid Pod session. Proxy verification failures still lock the Pod. Correct the URL in Subject System Tabs and restart the Pod if the page remains unavailable.</p>
+            <h3>A Service Requests Extra Verification</h3><p>Use a System Tab for accounts that must keep cookies across restarts. Temporary Tabs intentionally use isolated in-memory storage and look like a new browser after they close. Pod is an embedded Electron user-agent, so some identity providers may require extra verification or reject an authorization flow even when VLESS is healthy. Proxy IP reputation and sudden geography changes are independent signals; do not try to hide the embedded runtime by forging browser identity.</p>
             <h3>Safe Recovery</h3><p>Do not delete database volumes while diagnosing state. Create a backup, preserve the public endpoint and only then rebuild or restore the core.</p>
           </article>
           <div id="documentationEmpty" class="documentation-empty" hidden>No documentation sections match this search.</div>
@@ -1555,6 +1556,20 @@ docker compose logs --tail=200 perimetr-api</pre>
       <button id="closeFullscreen" class="close-panel" aria-label="close">X</button>
     </div>
     <div id="fullscreenBody" class="fullscreen-body"></div>
+  </div>
+  <div id="projectCreateModalBackdrop" class="modal-backdrop top" aria-hidden="true">
+    <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="projectCreateModalTitle">
+      <div class="modal-head">
+        <h2 id="projectCreateModalTitle">Create Project</h2>
+        <button id="closeProjectCreateModal" class="close-panel" aria-label="close">X</button>
+      </div>
+      <label>project name<input id="newProjectName" autocomplete="off" maxlength="255" placeholder="Project name" /></label>
+      <p class="hint">A new workspace Object will be added to Projects.</p>
+      <div class="actions">
+        <button id="confirmProjectCreate" class="primary">Create Project</button>
+        <button id="cancelProjectCreate">Cancel</button>
+      </div>
+    </div>
   </div>
   <div id="propertyModalBackdrop" class="modal-backdrop" aria-hidden="true">
     <div class="property-modal" role="dialog" aria-modal="true" aria-labelledby="propertyModalTitle">
@@ -1785,7 +1800,10 @@ docker compose logs --tail=200 perimetr-api</pre>
     const subjectPodState = {{ subjectId: "", config: null, provisioning: [], instances: [], selected: null }};
     const modalDrag = {{ modal: null, offsetX: 0, offsetY: 0 }};
     const headers = {{ "Content-Type": "application/json" }};
+    const subjectConversionInFlight = new Set();
     let pendingApiFeedbackTimer = null;
+    let subjectProxyAutosaveTimer = null;
+    let subjectProxyAutosaveGeneration = 0;
 
     async function api(path, options = {{}}) {{
       const {{ feedback = true, ...requestOptions }} = options;
@@ -1811,6 +1829,9 @@ docker compose logs --tail=200 perimetr-api</pre>
         invalid_credentials: "Login or password is incorrect.",
         new_password_confirmation_mismatch: "Passwords do not match.",
         pod_password_confirmation_mismatch: "Passwords do not match.",
+        pod_decoy_password_confirmation_required: "Enter and repeat the decoy password, or leave both fields empty.",
+        pod_decoy_password_confirmation_mismatch: "Decoy passwords do not match.",
+        pod_decoy_password_must_differ: "The decoy password must differ from the primary password.",
         new_password_too_short: "Password must contain at least 12 characters.",
         pod_password_too_short: "Password must contain at least 8 characters.",
         current_password_invalid: "Current password is incorrect.",
@@ -3164,7 +3185,7 @@ docker compose logs --tail=200 perimetr-api</pre>
           <section class="subject-pod-section">
             <h3>Subject Network</h3>
             <label>VLESS connection<textarea id="subjectVlessConnection" spellcheck="false" placeholder="vless://..."></textarea></label>
-            <p class="hint">One active VLESS URI is inherited by every Pod of this Subject. Direct fallback is blocked.</p>
+            <p class="hint">One active VLESS URI is inherited by every Pod of this Subject. It saves automatically after typing stops; direct fallback is blocked.</p>
             <label>Update channel<select id="subjectUpdateChannel"><option value="stable">Stable</option><option value="beta">Beta</option></select></label>
             <p class="hint">Stable accepts production releases. Beta accepts prerelease builds. Both require a signed update manifest; without one, the Pod does not download updates.</p>
           </section>
@@ -3213,6 +3234,8 @@ docker compose logs --tail=200 perimetr-api</pre>
       }}).join("") || `<div class="pod-empty">no activated pods</div>`;
     }}
     async function loadSubjectWorkspace(subjectId) {{
+      window.clearTimeout(subjectProxyAutosaveTimer);
+      subjectProxyAutosaveGeneration += 1;
       const [config, pods] = await Promise.all([api(`/v1/subjects/${{encodeURIComponent(subjectId)}}/pod-config`), api(`/v1/subjects/${{encodeURIComponent(subjectId)}}/pods`)]);
       subjectPodState.subjectId = subjectId;
       subjectPodState.config = config;
@@ -3231,12 +3254,33 @@ docker compose logs --tail=200 perimetr-api</pre>
       }})).filter(tab => tab.title || tab.url);
     }}
     async function saveSubjectPodConfig(subjectId) {{
+      window.clearTimeout(subjectProxyAutosaveTimer);
+      subjectProxyAutosaveGeneration += 1;
       await api(`/v1/subjects/${{encodeURIComponent(subjectId)}}/pod-config`, {{ method: "PUT", body: JSON.stringify({{
         vless_connection: el("subjectVlessConnection").value.trim(), system_tabs: collectSubjectSystemTabs(),
         update_channel: el("subjectUpdateChannel").value,
       }}) }});
       await loadSubjectWorkspace(subjectId);
       recordUiAction("subject.pod_config.updated", "subject", subjectId);
+    }}
+    function scheduleSubjectProxyAutosave(subjectId, value) {{
+      window.clearTimeout(subjectProxyAutosaveTimer);
+      const generation = ++subjectProxyAutosaveGeneration;
+      subjectProxyAutosaveTimer = window.setTimeout(async () => {{
+        if (subjectPodState.subjectId !== subjectId || generation !== subjectProxyAutosaveGeneration) return;
+        try {{
+          const saved = await api(`/v1/subjects/${{encodeURIComponent(subjectId)}}/pod-config`, {{
+            method: "PUT",
+            feedback: false,
+            body: JSON.stringify({{ vless_connection: value.trim() }}),
+          }});
+          if (generation !== subjectProxyAutosaveGeneration) return;
+          subjectPodState.config = saved;
+          notify("Proxy connection saved automatically.", "success");
+        }} catch (error) {{
+          if (generation === subjectProxyAutosaveGeneration) notify(error.message, "error");
+        }}
+      }}, 850);
     }}
     function openPodModal(title, body) {{
       el("podModalTitle").textContent = title; el("podModalBody").innerHTML = body; resetModalPosition("podModalBackdrop");
@@ -3245,6 +3289,7 @@ docker compose logs --tail=200 perimetr-api</pre>
     function closePodModal() {{ el("podModalBackdrop").classList.remove("open"); el("podModalBackdrop").setAttribute("aria-hidden", "true"); subjectPodState.selected = null; }}
     function closeBackdrop(backdrop) {{
       const closers = {{
+        projectCreateModalBackdrop: closeProjectCreateModal,
         propertyModalBackdrop: closePropertyModal,
         passwordModalBackdrop: closePasswordModal,
         backupImportModalBackdrop: closeBackupImportModal,
@@ -3259,16 +3304,18 @@ docker compose logs --tail=200 perimetr-api</pre>
     }}
     function openCreatePodModal(subjectId) {{
       subjectPodState.subjectId = subjectId;
-      openPodModal("Create Pod", `<div class="form-grid"><label class="full">Login<input id="newPodLogin" autocomplete="username" /></label><label>Password<input id="newPodPassword" type="password" autocomplete="new-password" /></label><label>Repeat Password<input id="newPodPasswordConfirm" type="password" autocomplete="new-password" /></label></div><p class="hint">This login names the Pod and is used only by this bundle. The password is stored as a salted hash.</p><div class="actions"><button class="primary" data-confirm-create-pod="true">Create Pod</button></div>`);
+      openPodModal("Create Pod", `<div class="form-grid"><label class="full">Login<input id="newPodLogin" autocomplete="username" /></label><label>Password<input id="newPodPassword" type="password" autocomplete="new-password" /></label><label>Repeat Password<input id="newPodPasswordConfirm" type="password" autocomplete="new-password" /></label><label>Decoy Password <small>(optional)</small><input id="newPodDecoyPassword" type="password" autocomplete="new-password" /></label><label>Repeat Decoy Password<input id="newPodDecoyPasswordConfirm" type="password" autocomplete="new-password" /></label></div><p class="hint">The primary password opens the Subject. The optional decoy password opens a clean Pod with only the default Google search in an isolated temporary profile. Passwords are stored only as salted hashes.</p><div class="actions"><button class="primary" data-confirm-create-pod="true">Create Pod</button></div>`);
     }}
     async function createPodProvisioning() {{
       const login = el("newPodLogin").value.trim();
       const password = el("newPodPassword").value;
       const confirmPassword = el("newPodPasswordConfirm").value;
+      const decoyPassword = el("newPodDecoyPassword").value;
+      const confirmDecoyPassword = el("newPodDecoyPasswordConfirm").value;
       const progress = notify("Checking the latest verified Pod release...", "info", 0);
       let record;
       try {{
-        record = await api(`/v1/subjects/${{encodeURIComponent(subjectPodState.subjectId)}}/pods`, {{ method: "POST", body: JSON.stringify({{ login, password, confirm_password: confirmPassword }}) }});
+        record = await api(`/v1/subjects/${{encodeURIComponent(subjectPodState.subjectId)}}/pods`, {{ method: "POST", body: JSON.stringify({{ login, password, confirm_password: confirmPassword, decoy_password: decoyPassword || null, confirm_decoy_password: confirmDecoyPassword || null }}) }});
       }} finally {{
         progress?.remove();
       }}
@@ -3398,16 +3445,38 @@ docker compose logs --tail=200 perimetr-api</pre>
       notify("Image removed.", "success");
       openOverviewBlock(blockId);
     }}
+    function openProjectCreateModal() {{
+      resetModalPosition("projectCreateModalBackdrop");
+      el("newProjectName").value = "";
+      el("projectCreateModalBackdrop").classList.add("open");
+      el("projectCreateModalBackdrop").setAttribute("aria-hidden", "false");
+      window.setTimeout(() => el("newProjectName").focus(), 0);
+    }}
+    function closeProjectCreateModal() {{
+      el("projectCreateModalBackdrop").classList.remove("open");
+      el("projectCreateModalBackdrop").setAttribute("aria-hidden", "true");
+    }}
     async function createQuickProject() {{
-      const name = window.prompt("Project name");
-      if (!name || !name.trim()) return;
-      await api("/v1/objects", {{ method: "POST", body: JSON.stringify({{
-        name: name.trim(),
-        kind: "workspace",
-        description: "",
-        tags: [],
-      }}) }});
-      await refresh();
+      const name = el("newProjectName").value.trim();
+      if (!name) {{
+        notify("Enter a project name.", "error");
+        el("newProjectName").focus();
+        return;
+      }}
+      const button = el("confirmProjectCreate");
+      button.disabled = true;
+      try {{
+        await api("/v1/objects", {{ method: "POST", feedback: "Project created.", body: JSON.stringify({{
+          name,
+          kind: "workspace",
+          description: "",
+          tags: [],
+        }}) }});
+        closeProjectCreateModal();
+        await refresh();
+      }} finally {{
+        button.disabled = false;
+      }}
     }}
     function closeFullscreen() {{
       if (agentUiState.viewingAgent) {{
@@ -3481,7 +3550,15 @@ docker compose logs --tail=200 perimetr-api</pre>
     async function createSubject(objectId = null) {{
       const selectedObjectId = objectId || el("subjectObject")?.value;
       if (!selectedObjectId) return alert("create an object first");
-      const transformed = await api("/v1/subjects", {{ method: "POST", body: JSON.stringify({{ object_id: selectedObjectId, runtime_type: "web" }}) }});
+      if (subjectConversionInFlight.has(selectedObjectId)) return;
+      subjectConversionInFlight.add(selectedObjectId);
+      document.querySelectorAll(`[data-object-subject="${{CSS.escape(selectedObjectId)}}"]`).forEach(button => button.disabled = true);
+      let transformed;
+      try {{
+        transformed = await api("/v1/subjects", {{ method: "POST", body: JSON.stringify({{ object_id: selectedObjectId, runtime_type: "web" }}) }});
+      }} finally {{
+        subjectConversionInFlight.delete(selectedObjectId);
+      }}
       const objectBlock = `object_${{selectedObjectId}}`;
       const subjectBlock = `subject_${{transformed.id}}`;
       if (Object.hasOwn(uiState.descriptionsByBlock, objectBlock)) {{
@@ -3794,6 +3871,8 @@ docker compose logs --tail=200 perimetr-api</pre>
         if (target.id === "closePropertyModal") closePropertyModal();
         if (target.id === "openPasswordModal") openPasswordModal();
         if (target.id === "closePasswordModal") closePasswordModal();
+        if (target.id === "closeProjectCreateModal" || target.id === "cancelProjectCreate") closeProjectCreateModal();
+        if (target.id === "confirmProjectCreate") await createQuickProject();
         if (target.id === "openImportBackupModal") openBackupImportModal();
         if (target.id === "closeBackupImportModal") closeBackupImportModal();
         if (target.id === "openAgentLibraryModal") {{ agentUiState.libraryOnly = false; await openAgentLibraryModal(); }}
@@ -3892,7 +3971,7 @@ docker compose logs --tail=200 perimetr-api</pre>
         if (capabilityItem?.dataset.runAgentCapability) await runAgentCapability(capabilityItem.dataset.runAgentCapability);
         const approvalItem = target.closest("[data-open-agent-approval]");
         if (approvalItem?.dataset.openAgentApproval && approvalItem.dataset.jobId) openAgentApproval(approvalItem.dataset.openAgentApproval, approvalItem.dataset.jobId);
-        if (target.dataset.createProject) await createQuickProject();
+        if (target.dataset.createProject) openProjectCreateModal();
         if (target.id === "createObject") await createObject();
         if (target.id === "createSubject") await createSubject();
         if (target.id === "applyTheme") {{ applyTheme(true); recordUiAction("appearance.theme.updated", "settings", "appearance"); }}
@@ -3910,6 +3989,11 @@ docker compose logs --tail=200 perimetr-api</pre>
     }});
     document.addEventListener("keydown", event => {{
       const target = event.target;
+      if (target instanceof HTMLElement && target.id === "newProjectName" && event.key === "Enter") {{
+        event.preventDefault();
+        createQuickProject().catch(error => notify(error.message, "error"));
+        return;
+      }}
       if (target instanceof HTMLElement && target.id === "fullscreenTitle" && event.key === "Enter") {{
         event.preventDefault();
         target.blur();
@@ -3965,6 +4049,9 @@ docker compose logs --tail=200 perimetr-api</pre>
         uiState.descriptionsByBlock[uiState.activeDescriptionBlock || "human_general"] = target.value;
         adjustHumanDescriptionSize();
         saveLocalState();
+      }}
+      if (target.id === "subjectVlessConnection" && subjectPodState.subjectId) {{
+        scheduleSubjectProxyAutosave(subjectPodState.subjectId, target.value);
       }}
       if (target.id === "agentLibrarySearch") renderAgentLibraryList();
       if (target.id === "agentsPageSearch") renderAgentsPageList();

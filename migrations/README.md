@@ -62,3 +62,12 @@ change is additive, so the `0003` image can still read a database upgraded to
 The existing `metadata_json` stores the signed immutable release manifest for
 remote artifacts, allowing an exact checksum-verified re-download after a
 system-backup restore where the local artifact cache is not present.
+
+## Revision 0005: Pod decoy password hashes
+
+Revision `0005` adds a non-null `decoy_password_hash` text column with an empty
+default to both `pods` and `pod_provisioning_records`. Existing Pods therefore
+retain primary-only authentication, while newly provisioned Pods may store a
+separate salted decoy-password hash. The change is additive and contains no
+plaintext credential migration. Downgrade removes only the two new columns, so
+the `0004` image can read a database downgraded from `0005`.

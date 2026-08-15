@@ -107,6 +107,19 @@ cannot replace the last-known-good cache. If neither cache nor factory runtime
 is valid, creation returns `503 pod_runtime_unavailable` instead of producing a
 non-runnable archive.
 
+Pod provisioning accepts an optional decoy password distinct from the primary
+password. Perimetr authorizes the resulting access mode with a signed in-memory
+grant: primary access receives the Subject configuration, while decoy access
+receives no Subject identity or System Tabs and opens Google in a disposable
+partition. The locked screen never exposes or pre-fills the Pod login.
+
+VLESS changes on a Subject save automatically after typing stops and are
+confirmed by a green top-right notice. Account sessions that need continuity
+belong in System Tabs because Temporary Tabs intentionally clear browser state
+when closed. OAuth providers can still challenge or reject embedded Electron
+user agents independently of proxy routing, and proxy IP reputation or rapid
+geography changes can cause additional verification.
+
 The first operator login is read from `PERIMETR_DIRECT_USERNAME` and
 `PERIMETR_ENTRY_PASSWORD`. Production refuses example/placeholder credentials,
 passwords shorter than 12 characters, insecure cookies, non-HTTPS public

@@ -6,7 +6,7 @@ from .kernel_register import apply_register
 
 
 class Settings(BaseSettings):
-    perimetr_version: str = "1.2.0"
+    perimetr_version: str = "1.2.1"
     perimetr_env: str = "development"
     perimetr_host: str = "0.0.0.0"
     perimetr_repository_url: str = ""
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     perimetr_pod_signing_secret: str = "change-this-pod-signing-secret"
     perimetr_pod_bundle_source: str = "/opt/perimetr/pod-runtime"
     perimetr_pod_cache_dir: str = str(Path(".tmp") / "pod-runtime-cache")
-    perimetr_pod_version: str = "0.1.2"
+    perimetr_pod_version: str = "0.1.3"
     perimetr_pod_update_public_key_path: str = "/opt/perimetr/pod-runtime/pod-update-public-key.pem"
     perimetr_pod_refresh_sec: int = 900
     perimetr_pod_download_timeout_sec: float = 120.0
