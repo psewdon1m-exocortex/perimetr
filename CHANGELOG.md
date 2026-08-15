@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.2 - 2026-08-15
+
+- Restore detached Sigstore release bundles for compatibility with production
+  hosts that still run Updater 0.1.x.
+- Embed the signed Updater 0.2.1 transition release in new installations.
+
 ## 1.2.1 - 2026-08-15
 
 - Replace the browser Project prompt with the Perimetr modal workflow.

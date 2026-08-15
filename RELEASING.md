@@ -17,7 +17,8 @@ Perimetr releases use tags in the form `perimetr-vMAJOR.MINOR.PATCH`.
    repository.
 6. `.github/workflows/release.yml` verifies those external artifacts before it
    publishes the OCI image, SBOM, provenance, Compose bundle, release manifest
-   and checksums.
+   checksums and keyless Sigstore bundles retained for Updater 0.1.x
+   compatibility.
 
 The Settings updater refreshes Kernel Register, reads
 `repositories.perimetr.url`, and considers only `perimetr-v*` releases in that
@@ -45,3 +46,8 @@ replacement. A single Compose replica has a short connection interruption;
 zero downtime requires two API replicas behind a reverse proxy and
 backward-compatible migrations. Failed health checks automatically restore the
 previous image digest and import the pre-update ZIP.
+
+Production hosts on Updater 0.1.x must first run `sudo updater update --head
+perimetr`. The signed Updater transition release makes that self-update
+possible; afterward the normal Perimetr update can consume the simplified
+manifest format.

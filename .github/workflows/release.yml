@@ -28,6 +28,9 @@ jobs:
             requirements.txt
             requirements.runtime.txt
             requirements.dev.txt
+      # Updater 0.1.x requires a detached Sigstore bundle while resolving a
+      # head release. Keep it for production upgrade compatibility.
+      - uses: sigstore/cosign-installer@v3.10.1
       - uses: docker/setup-buildx-action@v3
 
       - name: Resolve version
@@ -138,6 +141,20 @@ jobs:
           UPDATER_BUNDLE_DIR="$PWD/.release-inputs/updater" \
           UPDATER_BUNDLE_VERSION="$updater_version" \
             bash scripts/build-release.sh "${{ steps.release.outputs.version }}"
+
+      - name: Sign backward-compatible release artifacts
+        shell: bash
+        run: |
+          find release-artifacts -maxdepth 1 -type f ! -name '*.sigstore.json' -print0 |
+            while IFS= read -r -d '' artifact; do
+              cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+            done
+
+          cosign verify-blob \
+            --bundle release-artifacts/perimetr-release.json.sigstore.json \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-artifacts/perimetr-release.json
 
       - uses: actions/attest-build-provenance@v3
         with:
