@@ -231,6 +231,11 @@ def test_direct_login_and_core_shell(monkeypatch) -> None:
         assert "Shell Command" not in shell.text
         assert 'id="installUpdate"' in shell.text
         assert 'id="updaterAvailability"' in shell.text
+        assert 'id="updateInstallModalBackdrop"' in shell.text
+        assert 'id="confirmInstallUpdate"' in shell.text
+        assert "Install Perimetr Update" in shell.text
+        assert "Download backup and install" in shell.text
+        assert "window.confirm(" not in shell.text
 
         runtime = client.get("/v1/settings/runtime")
         assert runtime.status_code == 200

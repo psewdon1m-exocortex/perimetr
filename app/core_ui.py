@@ -826,6 +826,8 @@ def build_core_index_html() -> str:
       gap: 14px;
       position: relative;
     }}
+    .update-install-modal {{ width: min(620px, calc(100vw - 48px)); }}
+    .update-install-modal > .actions {{ justify-content: flex-end; }}
     .attachment-field {{
       display: none;
     }}
@@ -1640,6 +1642,20 @@ docker compose logs --tail=200 perimetr-api</pre>
       </div>
     </div>
   </div>
+  <div id="updateInstallModalBackdrop" class="modal-backdrop top" aria-hidden="true">
+    <div class="settings-modal update-install-modal" role="dialog" aria-modal="true" aria-labelledby="updateInstallModalTitle">
+      <div class="modal-head">
+        <h2 id="updateInstallModalTitle">Install Perimetr Update</h2>
+        <button id="closeUpdateInstallModal" class="close-panel" aria-label="close">X</button>
+      </div>
+      <h3 id="updateInstallQuestion">Install Perimetr update?</h3>
+      <p class="hint">A full backup will be downloaded first. The local updater will verify the signed release, preserve persistent data, run health checks and automatically roll back on failure.</p>
+      <div class="actions">
+        <button id="cancelInstallUpdate">Cancel</button>
+        <button id="confirmInstallUpdate" class="danger">Download backup and install</button>
+      </div>
+    </div>
+  </div>
   <div id="agentLibraryModalBackdrop" class="modal-backdrop top" aria-hidden="true">
     <div class="settings-modal agent-modal" role="dialog" aria-modal="true" aria-labelledby="agentLibraryModalTitle">
       <div class="modal-head">
@@ -1733,7 +1749,7 @@ docker compose logs --tail=200 perimetr-api</pre>
   </div>
 
   <script>
-    const state = {{ objects: [], subjects: [], pods: [], agents: [], overviewBlocks: [], audit: [], logs: [], metrics: null, backups: [], runtime: null, updateCheck: null, updaterRuntime: null, updateJob: null, correlationPercentage: 0 }};
+    const state = {{ objects: [], subjects: [], pods: [], agents: [], overviewBlocks: [], audit: [], logs: [], metrics: null, backups: [], runtime: null, updateCheck: null, updaterRuntime: null, updateJob: null, pendingUpdateVersion: "", updateInstallPending: false, correlationPercentage: 0 }};
     const uiState = {{
       descriptionsByBlock: {{}},
       propertiesByBlock: {{}},
@@ -3017,6 +3033,25 @@ docker compose logs --tail=200 perimetr-api</pre>
       el("backupImportModalBackdrop").classList.remove("open");
       el("backupImportModalBackdrop").setAttribute("aria-hidden", "true");
     }}
+    function openUpdateInstallModal() {{
+      const version = state.updateCheck?.available_version;
+      if (!version || !state.updaterRuntime?.available) return;
+      state.pendingUpdateVersion = version;
+      el("updateInstallQuestion").textContent = `Install Perimetr ${{version}}?`;
+      el("confirmInstallUpdate").textContent = "Download backup and install";
+      el("confirmInstallUpdate").disabled = false;
+      el("cancelInstallUpdate").disabled = false;
+      el("closeUpdateInstallModal").disabled = false;
+      resetModalPosition("updateInstallModalBackdrop");
+      el("updateInstallModalBackdrop").classList.add("open");
+      el("updateInstallModalBackdrop").setAttribute("aria-hidden", "false");
+    }}
+    function closeUpdateInstallModal(force = false) {{
+      if (state.updateInstallPending && !force) return;
+      el("updateInstallModalBackdrop").classList.remove("open");
+      el("updateInstallModalBackdrop").setAttribute("aria-hidden", "true");
+      state.pendingUpdateVersion = "";
+    }}
     function addPropertyToBlock(blockId, property, insertionIndex = null) {{
       const next = {{ ...property, id: property.id || uid() }};
       if ((uiState.propertiesByBlock[blockId] || []).some(item => item.id === next.id)) {{
@@ -3293,6 +3328,7 @@ docker compose logs --tail=200 perimetr-api</pre>
         propertyModalBackdrop: closePropertyModal,
         passwordModalBackdrop: closePasswordModal,
         backupImportModalBackdrop: closeBackupImportModal,
+        updateInstallModalBackdrop: closeUpdateInstallModal,
         agentLibraryModalBackdrop: closeAgentLibraryModal,
         agentRemoveModalBackdrop: closeAgentRemoveModal,
         entityDeleteModalBackdrop: closeEntityDeleteModal,
@@ -3720,25 +3756,36 @@ docker compose logs --tail=200 perimetr-api</pre>
       notify("Update job is still running. Refresh Settings to continue monitoring.", "info");
     }}
     async function installUpdate() {{
-      const version = state.updateCheck?.available_version;
+      const version = state.pendingUpdateVersion;
       if (!version || !state.updaterRuntime?.available) return;
-      if (!window.confirm(`Install Perimetr ${{version}}? A complete backup will be downloaded before the local updater starts.`)) return;
       const button = el("installUpdate");
+      const confirmButton = el("confirmInstallUpdate");
+      state.updateInstallPending = true;
       button.disabled = true;
-      button.textContent = "Preparing Backup...";
+      confirmButton.disabled = true;
+      el("cancelInstallUpdate").disabled = true;
+      el("closeUpdateInstallModal").disabled = true;
+      confirmButton.textContent = "Preparing backup...";
       try {{
         const backup = await createBackup();
-        button.textContent = "Starting Update...";
+        confirmButton.textContent = "Starting update...";
         const job = await api("/v1/updater/install", {{
           method: "POST",
           body: JSON.stringify({{ version, backup_id: backup.id }}),
         }});
         renderUpdateJob(job);
+        closeUpdateInstallModal(true);
         notify("Backup downloaded and Perimetr update job started.", "success");
         pollUpdateJob(job.id).catch(error => notify(error.message, "error"));
+      }} catch (error) {{
+        notify(error.message, "error");
       }} finally {{
-        button.textContent = "Install Update";
-        button.disabled = !state.updaterRuntime?.available;
+        state.updateInstallPending = false;
+        confirmButton.textContent = "Download backup and install";
+        confirmButton.disabled = false;
+        el("cancelInstallUpdate").disabled = false;
+        el("closeUpdateInstallModal").disabled = false;
+        button.disabled = !state.updaterRuntime?.available || !state.updateCheck?.update_available;
       }}
     }}
     async function importBackup() {{
@@ -3875,6 +3922,8 @@ docker compose logs --tail=200 perimetr-api</pre>
         if (target.id === "confirmProjectCreate") await createQuickProject();
         if (target.id === "openImportBackupModal") openBackupImportModal();
         if (target.id === "closeBackupImportModal") closeBackupImportModal();
+        if (target.id === "closeUpdateInstallModal" || target.id === "cancelInstallUpdate") closeUpdateInstallModal();
+        if (target.id === "confirmInstallUpdate") await installUpdate();
         if (target.id === "openAgentLibraryModal") {{ agentUiState.libraryOnly = false; await openAgentLibraryModal(); }}
         if (target.dataset.addAgentLibrary) {{
           agentUiState.libraryOnly = true;
@@ -3978,7 +4027,7 @@ docker compose logs --tail=200 perimetr-api</pre>
         if (target.id === "resetTheme") {{ localStorage.removeItem("perimetr.theme"); loadUiSettings(); recordUiAction("appearance.theme.reset", "settings", "appearance"); }}
         if (target.id === "createBackup") await createBackup();
         if (target.id === "checkForUpdates") await checkForUpdates();
-        if (target.id === "installUpdate") await installUpdate();
+        if (target.id === "installUpdate") openUpdateInstallModal();
         if (target.id === "importBackup") await importBackup();
         if (target.id === "changePassword") await changePassword();
         if (target.dataset.objectSubject) await createSubject(target.dataset.objectSubject);

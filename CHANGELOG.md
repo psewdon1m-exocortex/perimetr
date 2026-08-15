@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.3 - 2026-08-15
+
+- Replace the browser confirmation used for Perimetr updates with the standard
+  in-app confirmation modal and explicit backup-first install action.
+
 ## 1.2.2 - 2026-08-15
 
 - Restore detached Sigstore release bundles for compatibility with production
