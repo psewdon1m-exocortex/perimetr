@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+import hashlib
+import json
 import secrets
+import time
 from typing import Any
 from urllib.parse import urljoin
 
@@ -10,11 +13,15 @@ import httpx
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 
 class AgentTransportError(RuntimeError):
     pass
+
+
+CONTROLLER_SIGNATURE_CONTEXT = "exocortex-controller-request-v1"
 
 
 def _endpoint(base_url: str, path: str) -> str:
@@ -32,13 +39,32 @@ def _request(
     timeout_seconds: float,
     controller_id: str,
     payload: dict[str, Any] | None = None,
+    controller_private_key_pem: str = "",
 ) -> dict[str, Any]:
+    url = _endpoint(base_url, path)
+    body = (
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        if payload is not None
+        else b""
+    )
+    headers = {"X-Controller-ID": controller_id}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    if controller_private_key_pem:
+        headers.update(
+            _controller_signature_headers(
+                method=method,
+                url=url,
+                body=body,
+                private_key_pem=controller_private_key_pem,
+            )
+        )
     try:
         response = httpx.request(
             method,
-            _endpoint(base_url, path),
-            json=payload,
-            headers={"X-Controller-ID": controller_id},
+            url,
+            content=body if payload is not None else None,
+            headers=headers,
             timeout=timeout_seconds,
             follow_redirects=False,
         )
@@ -65,6 +91,7 @@ def enroll(
     enrollment_token: str,
     expected_fingerprint: str,
     controller_id: str,
+    controller_certificate_pem: str,
     heartbeat_endpoint: str,
     timeout_seconds: float,
 ) -> dict[str, Any]:
@@ -81,6 +108,7 @@ def enroll(
             "enrollment_token": enrollment_token,
             "challenge": challenge,
             "controller_id": controller_id,
+            "controller_cert": controller_certificate_pem,
             "heartbeat_endpoint": heartbeat_endpoint,
         },
     )
@@ -123,6 +151,7 @@ def dispatch_job(
     inputs: dict[str, Any],
     created_at: datetime,
     expires_at: datetime,
+    controller_private_key_pem: str = "",
 ) -> dict[str, Any]:
     return _request(
         "POST",
@@ -130,6 +159,7 @@ def dispatch_job(
         "/v1/jobs",
         timeout_seconds=timeout_seconds,
         controller_id=controller_id,
+        controller_private_key_pem=controller_private_key_pem,
         payload={
             "protocol_version": "1",
             "job_id": job_id,
@@ -154,6 +184,7 @@ def decide_job(
     plan_hash: str,
     confirmation_phrase: str = "",
     hostname_confirmation: str = "",
+    controller_private_key_pem: str = "",
 ) -> dict[str, Any]:
     return _request(
         "POST",
@@ -161,6 +192,7 @@ def decide_job(
         f"/v1/jobs/{job_id}/approve",
         timeout_seconds=timeout_seconds,
         controller_id=controller_id,
+        controller_private_key_pem=controller_private_key_pem,
         payload={
             "decision": decision,
             "approval_id": approval_id,
@@ -179,6 +211,7 @@ def cancel_job(
     controller_id: str,
     timeout_seconds: float,
     job_id: str,
+    controller_private_key_pem: str = "",
 ) -> dict[str, Any]:
     return _request(
         "POST",
@@ -186,7 +219,46 @@ def cancel_job(
         f"/v1/jobs/{job_id}/cancel",
         timeout_seconds=timeout_seconds,
         controller_id=controller_id,
+        controller_private_key_pem=controller_private_key_pem,
     )
+
+
+def _controller_signature_headers(
+    *,
+    method: str,
+    url: str,
+    body: bytes,
+    private_key_pem: str,
+) -> dict[str, str]:
+    parsed = httpx.URL(url)
+    target = parsed.raw_path.decode("ascii")
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_urlsafe(18)
+    canonical = "\n".join(
+        (
+            CONTROLLER_SIGNATURE_CONTEXT,
+            method.upper(),
+            target,
+            timestamp,
+            nonce,
+            hashlib.sha256(body).hexdigest(),
+        )
+    ).encode("utf-8")
+    try:
+        private_key = serialization.load_pem_private_key(
+            private_key_pem.encode("utf-8"), password=None
+        )
+    except (TypeError, ValueError) as exc:
+        raise AgentTransportError("Controller request-signing key is invalid") from exc
+    if not isinstance(private_key, ec.EllipticCurvePrivateKey):
+        raise AgentTransportError("Controller request-signing key must use EC")
+    signature = private_key.sign(canonical, ec.ECDSA(hashes.SHA256()))
+    return {
+        "X-Controller-Signature-Version": "1",
+        "X-Controller-Timestamp": timestamp,
+        "X-Controller-Nonce": nonce,
+        "X-Controller-Signature": base64.b64encode(signature).decode("ascii"),
+    }
 
 
 def _utc_iso(value: datetime) -> str:

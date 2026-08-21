@@ -7,15 +7,17 @@ import json
 import base64
 import time
 import shutil
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi.testclient import TestClient
+from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from sqlalchemy import select
 from sqlalchemy.orm import close_all_sessions
 
@@ -36,6 +38,7 @@ from app.models import SystemSetting  # noqa: E402
 from app.security import LoginRateLimiter, is_password_hash  # noqa: E402
 from app.services import now_utc, visible_agent_status  # noqa: E402
 from app.pod_service import heartbeat_signing_bytes  # noqa: E402
+from app.agent_request_security import signing_bytes as agent_request_signing_bytes  # noqa: E402
 from app.logs_service.service import trim_log_directory, trim_log_file  # noqa: E402
 
 
@@ -68,14 +71,81 @@ def login(client: TestClient) -> None:
     assert "session_key" not in response.json()
 
 
+def agent_test_identity(agent_id: str) -> tuple[ec.EllipticCurvePrivateKey, str, str]:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(timezone.utc)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, agent_id)])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=30))
+        .sign(private_key, hashes.SHA256())
+    )
+    certificate_pem = certificate.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+    fingerprint = "SHA256:" + certificate.fingerprint(hashes.SHA256()).hex().upper()
+    return private_key, certificate_pem, fingerprint
+
+
+def signed_agent_request(
+    private_key: ec.EllipticCurvePrivateKey,
+    fingerprint: str,
+    path: str,
+    payload: dict,
+) -> tuple[bytes, dict[str, str]]:
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    timestamp = str(int(time.time()))
+    nonce = base64.urlsafe_b64encode(os.urandom(18)).rstrip(b"=").decode("ascii")
+    signature = private_key.sign(
+        agent_request_signing_bytes(
+            method="POST",
+            target=path,
+            timestamp=timestamp,
+            nonce=nonce,
+            body=body,
+        ),
+        ec.ECDSA(hashes.SHA256()),
+    )
+    return body, {
+        "Content-Type": "application/json",
+        "X-Agent-Fingerprint": fingerprint,
+        "X-Agent-Signature-Version": "1",
+        "X-Agent-Timestamp": timestamp,
+        "X-Agent-Nonce": nonce,
+        "X-Agent-Signature": base64.b64encode(signature).decode("ascii"),
+    }
+
+
 def test_direct_login_and_core_shell(monkeypatch) -> None:
     with TestClient(create_app()) as client:
+        robots = client.get("/robots.txt")
+        assert robots.status_code == 200
+        assert robots.text == "User-agent: *\nDisallow: /\n"
+        assert robots.headers["x-robots-tag"] == "noindex, nofollow, noarchive, nosnippet"
+        assert client.get("/docs").status_code == 404
+        assert client.get("/redoc").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+        for probe in ("/.env", "/wp-admin", "/phpmyadmin", "/.git/config"):
+            probe_response = client.get(probe)
+            assert probe_response.status_code == 404
+
         health = client.get("/v1/health")
         assert health.status_code == 200
         assert health.json() == {"status": "ok", "service": "perimetr"}
+        assert client.get(
+            "/v1/health", headers={"X-Forwarded-For": "203.0.113.10"}
+        ).status_code == 404
+        assert client.get(
+            "/v1/public/status", headers={"X-Forwarded-For": "203.0.113.10"}
+        ).status_code == 404
 
         entry = client.get("/")
         assert entry.status_code == 200
+        assert entry.headers["x-robots-tag"] == "noindex, nofollow, noarchive, nosnippet"
+        assert '<meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />' in entry.text
         assert 'aria-label="PERIMETR"' in entry.text
         assert 'placeholder="Login"' in entry.text
         assert 'placeholder="Password"' in entry.text
@@ -863,6 +933,18 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
 
 def test_agent_command_queue_still_available() -> None:
     with TestClient(create_app()) as client:
+        denied = client.post(
+            "/v1/agents/register",
+            json={
+                "name": "Untrusted Agent",
+                "agent_type": "agent",
+                "host_id": "untrusted-agent",
+                "api_base_url": "http://agent.invalid",
+                "identity_fingerprint": "untrusted-fingerprint",
+                "capabilities": [],
+            },
+        )
+        assert denied.status_code == 403
         login(client)
 
         register = client.post(
@@ -1100,7 +1182,7 @@ def test_agent_control_plane_registry_assignments_jobs_and_backup() -> None:
 
 def test_remote_agent_enrollment_dispatch_and_approval_are_forwarded(monkeypatch) -> None:
     agent_id = "remote-agent-dispatch-1"
-    fingerprint = "SHA256:REMOTE:AGENT:1"
+    private_key, certificate_pem, fingerprint = agent_test_identity(agent_id)
     calls: dict[str, list[dict]] = {"enroll": [], "dispatch": [], "decision": []}
 
     def fake_enroll(**kwargs):
@@ -1109,41 +1191,42 @@ def test_remote_agent_enrollment_dispatch_and_approval_are_forwarded(monkeypatch
         return {
             "status": "enrolled",
             "agent_id": agent_id,
-            "identity_certificate_pem": "verified-agent-certificate",
+            "identity_certificate_pem": certificate_pem,
             "fingerprint_sha256": fingerprint,
-                "certificate_serial": "remote-serial-1",
-                "certificate_valid_not_before": now - timedelta(minutes=1),
-                "certificate_valid_not_after": now + timedelta(days=30),
-                "agent_version": "1.0.0-test",
-                "sindri_version": "1.0.0-test",
-                "sindri_protocol_version": "1",
-                "capabilities": [
-                    {
-                        "action": "system.reboot",
-                        "title": "Reboot",
-                        "group": "System",
-                        "risk": "dangerous",
-                        "inputs": [],
-                        "available": True,
-                    },
-                    {
-                        "action": "user.password_change",
-                        "title": "Change password",
-                        "group": "Users",
-                        "risk": "change",
-                        "inputs": [
-                            {"name": "username", "type": "string", "required": True},
-                            {
-                                "name": "password",
-                                "type": "secret",
-                                "required": True,
-                                "secret": True,
-                            },
-                        ],
-                        "available": True,
-                    },
-                ],
-            }
+            "request_auth": "ecdsa-p256-sha256-v1",
+            "certificate_serial": "remote-serial-1",
+            "certificate_valid_not_before": now - timedelta(minutes=1),
+            "certificate_valid_not_after": now + timedelta(days=30),
+            "agent_version": "1.0.0-test",
+            "sindri_version": "1.0.0-test",
+            "sindri_protocol_version": "1",
+            "capabilities": [
+                {
+                    "action": "system.reboot",
+                    "title": "Reboot",
+                    "group": "System",
+                    "risk": "dangerous",
+                    "inputs": [],
+                    "available": True,
+                },
+                {
+                    "action": "user.password_change",
+                    "title": "Change password",
+                    "group": "Users",
+                    "risk": "change",
+                    "inputs": [
+                        {"name": "username", "type": "string", "required": True},
+                        {
+                            "name": "password",
+                            "type": "secret",
+                            "required": True,
+                            "secret": True,
+                        },
+                    ],
+                    "available": True,
+                },
+            ],
+        }
 
     def fake_dispatch(**kwargs):
         calls["dispatch"].append(kwargs)
@@ -1202,12 +1285,23 @@ def test_remote_agent_enrollment_dispatch_and_approval_are_forwarded(monkeypatch
             f"/api/agents/{agent_id}/heartbeat",
             json=heartbeat_payload,
         ).status_code == 403
+        heartbeat_path = f"/api/agents/{agent_id}/heartbeat"
+        heartbeat_body, heartbeat_headers = signed_agent_request(
+            private_key, fingerprint, heartbeat_path, heartbeat_payload
+        )
         heartbeat = client.post(
-            f"/api/agents/{agent_id}/heartbeat",
-            headers={"X-Agent-Fingerprint": fingerprint},
-            json=heartbeat_payload,
+            heartbeat_path,
+            headers=heartbeat_headers,
+            content=heartbeat_body,
         )
         assert heartbeat.status_code == 200
+        replayed = client.post(
+            heartbeat_path,
+            headers=heartbeat_headers,
+            content=heartbeat_body,
+        )
+        assert replayed.status_code == 403
+        assert replayed.json()["error"]["message"] == "AGENT_REQUEST_REPLAYED"
 
         secret_job = client.post(
             f"/api/agents/{agent_id}/jobs",
@@ -1233,19 +1327,24 @@ def test_remote_agent_enrollment_dispatch_and_approval_are_forwarded(monkeypatch
         assert calls["dispatch"][1]["job_id"] == job_id
         assert calls["dispatch"][1]["action"] == "system.reboot"
 
-        approval_event = client.post(
-            f"/api/agents/{agent_id}/jobs/{job_id}/events",
-            headers={"X-Agent-Fingerprint": fingerprint},
-            json={
-                "type": "job.approval_required",
-                "status": "approval_required",
-                "approval": {
-                    "approval_id": "approval-remote-1",
-                    "plan_hash": "sha256:remote-plan",
-                    "risk": "dangerous",
-                    "plan": [{"id": "reboot", "name": "Request system reboot"}],
-                },
+        event_path = f"/api/agents/{agent_id}/jobs/{job_id}/events"
+        event_payload = {
+            "type": "job.approval_required",
+            "status": "approval_required",
+            "approval": {
+                "approval_id": "approval-remote-1",
+                "plan_hash": "sha256:remote-plan",
+                "risk": "dangerous",
+                "plan": [{"id": "reboot", "name": "Request system reboot"}],
             },
+        }
+        event_body, event_headers = signed_agent_request(
+            private_key, fingerprint, event_path, event_payload
+        )
+        approval_event = client.post(
+            event_path,
+            headers=event_headers,
+            content=event_body,
         )
         assert approval_event.status_code == 200
         pending = client.get("/api/approvals/pending")

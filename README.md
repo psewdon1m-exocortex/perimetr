@@ -60,6 +60,12 @@ Perimetr `.env`. `services.perimetr.port` is the client-facing HTTPS port
 configuration is documented in the infrastructure repository's
 `NGINX_DEPLOYMENT.md`.
 
+The release bundle also carries Perimetr's independent
+`nginx.security.conf`. Include it inside the public HTTPS `server {}` block
+(for example, `include /opt/exocortex/perimetr/nginx.security.conf;`) and run
+`nginx -t` before reload. It does not enumerate UI elements, so adding tabs or
+cards does not require a proxy policy update.
+
 Agent communication is bidirectional but request-based. Agent opens periodic
 outbound heartbeat requests to Perimetr. Perimetr opens a request to the
 Agent's configured HTTPS endpoint only for enrollment, job dispatch,

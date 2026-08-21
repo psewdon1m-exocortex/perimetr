@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+import json
 
 import httpx
 from cryptography import x509
@@ -37,7 +38,7 @@ def test_enroll_verifies_agent_challenge_and_fingerprint(monkeypatch) -> None:
 
     def fake_request(method, url, **kwargs):
         observed.update({"method": method, "url": url, **kwargs})
-        challenge = kwargs["json"]["challenge"]
+        challenge = json.loads(kwargs["content"])["challenge"]
         signature = key.sign(challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
         return httpx.Response(
             200,
@@ -56,6 +57,7 @@ def test_enroll_verifies_agent_challenge_and_fingerprint(monkeypatch) -> None:
         enrollment_token="one-time-token",
         expected_fingerprint=fingerprint.lower(),
         controller_id="perimetr-1",
+        controller_certificate_pem="controller-certificate",
         heartbeat_endpoint="https://perimetr.example/api/agents/agent-1/heartbeat",
         timeout_seconds=4,
     )
@@ -63,6 +65,7 @@ def test_enroll_verifies_agent_challenge_and_fingerprint(monkeypatch) -> None:
     assert observed["method"] == "POST"
     assert observed["url"] == "https://agent.example:7443/v1/enroll"
     assert observed["headers"]["X-Controller-ID"] == "perimetr-1"
+    assert json.loads(observed["content"])["controller_cert"] == "controller-certificate"
     assert observed["follow_redirects"] is False
     assert result["fingerprint_sha256"] == fingerprint
     assert result["certificate_serial"]
@@ -70,6 +73,12 @@ def test_enroll_verifies_agent_challenge_and_fingerprint(monkeypatch) -> None:
 
 def test_agent_requests_are_readable_dispatch_and_decision_calls(monkeypatch) -> None:
     calls: list[tuple[str, str, dict]] = []
+    controller_key = ec.generate_private_key(ec.SECP256R1())
+    controller_private_key_pem = controller_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("utf-8")
 
     def fake_request(method, url, **kwargs):
         calls.append((method, url, kwargs))
@@ -87,6 +96,7 @@ def test_agent_requests_are_readable_dispatch_and_decision_calls(monkeypatch) ->
         inputs={"verbose": True},
         created_at=now,
         expires_at=now + timedelta(minutes=15),
+        controller_private_key_pem=controller_private_key_pem,
     )
     agent_client.decide_job(
         base_url="http://127.0.0.1:7443",
@@ -98,22 +108,28 @@ def test_agent_requests_are_readable_dispatch_and_decision_calls(monkeypatch) ->
         plan_hash="sha256:plan",
         confirmation_phrase="EXTERMINATUS",
         hostname_confirmation="node-1",
+        controller_private_key_pem=controller_private_key_pem,
     )
 
     assert calls[0][1].endswith("/v1/jobs")
-    assert calls[0][2]["json"]["action"] == "system.info"
-    assert calls[0][2]["json"]["expires_at"] == "2026-07-27T12:15:00Z"
+    first_payload = json.loads(calls[0][2]["content"])
+    second_payload = json.loads(calls[1][2]["content"])
+    assert first_payload["action"] == "system.info"
+    assert first_payload["expires_at"] == "2026-07-27T12:15:00Z"
     assert calls[1][1].endswith("/v1/jobs/job-1/approve")
-    assert calls[1][2]["json"]["decision"] == "approved"
-    assert calls[1][2]["json"]["approval"]["hostname_confirmation"] == "node-1"
+    assert second_payload["decision"] == "approved"
+    assert second_payload["approval"]["hostname_confirmation"] == "node-1"
+    assert calls[0][2]["headers"]["X-Controller-Signature-Version"] == "1"
+    assert calls[0][2]["headers"]["X-Controller-Signature"]
 
 
 def test_enroll_rejects_fingerprint_mismatch(monkeypatch) -> None:
     key, certificate_pem, _fingerprint = _identity_certificate()
 
     def fake_request(_method, _url, **kwargs):
+        payload = json.loads(kwargs["content"])
         signature = key.sign(
-            kwargs["json"]["challenge"].encode("utf-8"),
+            payload["challenge"].encode("utf-8"),
             ec.ECDSA(hashes.SHA256()),
         )
         return httpx.Response(
@@ -134,6 +150,7 @@ def test_enroll_rejects_fingerprint_mismatch(monkeypatch) -> None:
             enrollment_token="one-time-token",
             expected_fingerprint="SHA256:WRONG",
             controller_id="perimetr-1",
+            controller_certificate_pem="controller-certificate",
             heartbeat_endpoint="https://perimetr.example/api/agents/agent-1/heartbeat",
             timeout_seconds=4,
         )

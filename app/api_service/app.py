@@ -27,6 +27,14 @@ from ..agent_client import (
     dispatch_job as dispatch_remote_agent_job,
     enroll as enroll_remote_agent,
 )
+from ..agent_request_security import (
+    AgentRequestAuthError,
+    AgentRequestReplayCache,
+    has_signature_headers,
+    request_target,
+    verify_agent_request,
+)
+from ..controller_identity import ensure_controller_signing_material
 from ..backup_service.service import build_backup_payload, build_backup_zip, import_backup_bundle
 from ..database import SessionLocal, get_db
 from ..database_migrations import upgrade_database
@@ -190,6 +198,21 @@ from ..security import LoginRateLimiter, validate_runtime_settings
 from ..updater import check_github_release
 from .. import updater_client
 
+
+ROBOTS_POLICY = (Path(__file__).resolve().parents[1] / "robots.txt").read_text(
+    encoding="utf-8"
+)
+PROXY_IDENTITY_HEADERS = (
+    "forwarded",
+    "x-forwarded-for",
+    "x-real-ip",
+    "cf-connecting-ip",
+)
+BLOCKED_PROBE_PATH = re.compile(
+    r"(?:^|/)\.|\.(?:env|ini|log|sql|bak|backup|old|swp|zip|tar|gz)$",
+    re.IGNORECASE,
+)
+
 PERIMETR_SESSION_ID_COOKIE = "perimetr_session_id"
 PERIMETR_SESSION_KEY_COOKIE = "perimetr_session_key"
 MAX_ENTITY_IMAGE_BYTES = 4 * 1024 * 1024
@@ -328,6 +351,7 @@ def build_direct_login_html(*, error: str | None = None) -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />
   <title>perimetr</title>
   <style>
     :root {{
@@ -447,7 +471,7 @@ def build_direct_login_html(*, error: str | None = None) -> str:
   <main>
     <header class="login-header">
       <h1 aria-label="PERIMETR"><span aria-hidden="true">P</span><span aria-hidden="true">E</span><span aria-hidden="true">R</span><span aria-hidden="true">I</span><span aria-hidden="true">M</span><span aria-hidden="true">E</span><span aria-hidden="true">T</span><span aria-hidden="true">R</span></h1>
-      <div id="accessIndicator" class="access-status" role="status" aria-live="polite"><i class="status-spinner" aria-hidden="true"></i><span id="accessStatus">CHECKING</span></div>
+      <div id="accessIndicator" class="access-status" role="status" aria-live="polite"><span id="accessStatus">AVAILABLE</span></div>
     </header>
     <form id="loginForm">
       <input name="target" type="hidden" value="perimetr" />
@@ -483,20 +507,6 @@ def build_direct_login_html(*, error: str | None = None) -> str:
       if (theme.accent) document.documentElement.style.setProperty("--accent", theme.accent);
     }}
     applyStoredTheme();
-    function checkAvailability() {{
-      fetch("/v1/public/status").then(response => {{
-        if (!response.ok) throw new Error("unavailable");
-        return response.json();
-      }}).then(() => {{
-        document.getElementById("accessStatus").textContent = "AVAILABLE";
-        document.getElementById("accessIndicator").classList.remove("unavailable");
-      }}).catch(() => {{
-        document.getElementById("accessStatus").textContent = "UNAVAILABLE";
-        document.getElementById("accessIndicator").classList.add("unavailable");
-      }});
-    }}
-    checkAvailability();
-    window.setInterval(checkAvailability, 5000);
     const loginForm = document.getElementById("loginForm");
     const signInButton = document.getElementById("signInButton");
     const usernameInput = loginForm.elements.username;
@@ -580,8 +590,25 @@ async def _validate_backup_upload(archive: UploadFile) -> None:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="perimetr", version=get_settings().perimetr_version, lifespan=lifespan)
+    app = FastAPI(
+        title="perimetr",
+        version=get_settings().perimetr_version,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     app.state.login_rate_limiter = LoginRateLimiter()
+    app.state.agent_request_replay_cache = AgentRequestReplayCache()
+
+    @app.middleware("http")
+    async def anti_indexing_headers(request: Request, call_next):
+        if BLOCKED_PROBE_PATH.search(request.url.path):
+            response = JSONResponse(status_code=404, content={"error": "Not found"})
+        else:
+            response = await call_next(request)
+        response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
+        return response
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_, exc: HTTPException) -> JSONResponse:
@@ -592,6 +619,10 @@ def create_app() -> FastAPI:
             ).model_dump(),
             headers=exc.headers,
         )
+
+    @app.get("/robots.txt", include_in_schema=False)
+    def robots_txt() -> Response:
+        return Response(content=ROBOTS_POLICY, media_type="text/plain")
 
     @app.get("/", response_class=HTMLResponse)
     def index(
@@ -732,12 +763,47 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="perimetr_session_invalid")
         return lease
 
-    @app.get("/v1/health", response_model=HealthResponse)
-    def health() -> HealthResponse:
+    async def require_agent_callback_authentication(
+        request: Request,
+        agent: Agent,
+    ) -> None:
+        metadata = dict(agent.metadata_json or {})
+        if not metadata.get("remote_enrolled"):
+            return
+        headers = request.headers
+        if not has_signature_headers(headers):
+            if metadata.get("request_signing_required"):
+                raise HTTPException(status_code=403, detail="AGENT_SIGNATURE_REQUIRED")
+            if not secrets.compare_digest(
+                headers.get("x-agent-fingerprint") or "",
+                agent.identity_fingerprint,
+            ):
+                raise HTTPException(status_code=403, detail="AGENT_IDENTITY_MISMATCH")
+            return
+        try:
+            verify_agent_request(
+                certificate_pem=agent.identity_certificate,
+                expected_fingerprint=agent.identity_fingerprint,
+                method=request.method,
+                target=request_target(request.url.path, request.url.query),
+                body=await request.body(),
+                headers=headers,
+                replay_cache=app.state.agent_request_replay_cache,
+            )
+        except AgentRequestAuthError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        agent.metadata_json = {**metadata, "request_signing_required": True}
+
+    @app.get("/v1/health", response_model=HealthResponse, include_in_schema=False)
+    def health(request: Request) -> HealthResponse:
+        if any(request.headers.get(name) for name in PROXY_IDENTITY_HEADERS):
+            raise HTTPException(status_code=404, detail="not_found")
         return HealthResponse(status="ok", service="perimetr")
 
-    @app.get("/v1/public/status", response_model=StatusResponse)
-    def public_status(db: Session = Depends(get_db)) -> StatusResponse:
+    @app.get("/v1/public/status", response_model=StatusResponse, include_in_schema=False)
+    def public_status(request: Request, db: Session = Depends(get_db)) -> StatusResponse:
+        if any(request.headers.get(name) for name in PROXY_IDENTITY_HEADERS):
+            raise HTTPException(status_code=404, detail="not_found")
         return StatusResponse(**build_status_response(db))
 
     @app.get("/v1/status", response_model=StatusResponse)
@@ -1864,6 +1930,7 @@ def create_app() -> FastAPI:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />
   <title>{title} - Web Subject</title>
   <style>
     :root {{ --dark:#000000; --light:#ffffff; --accent:#00a8ff; --line:color-mix(in srgb, var(--light) 50%, transparent); --line-mid:color-mix(in srgb, var(--light) 75%, transparent); --line-outer:var(--light); }}
@@ -2412,6 +2479,9 @@ def create_app() -> FastAPI:
         remote_enrollment = None
         if payload.enrollment_token:
             settings = get_settings()
+            controller_identity = ensure_controller_signing_material(
+                db, settings, PERIMETR_SYSTEM_ENTITY_ID
+            )
             heartbeat_endpoint = (
                 f"{settings.perimetr_public_url.rstrip('/')}"
                 f"/api/agents/{payload.agent_id}/heartbeat"
@@ -2423,6 +2493,7 @@ def create_app() -> FastAPI:
                     enrollment_token=payload.enrollment_token,
                     expected_fingerprint=payload.identity_fingerprint,
                     controller_id=PERIMETR_SYSTEM_ENTITY_ID,
+                    controller_certificate_pem=controller_identity.certificate_pem,
                     heartbeat_endpoint=heartbeat_endpoint,
                     timeout_seconds=settings.perimetr_agent_request_timeout_sec,
                 )
@@ -2501,6 +2572,10 @@ def create_app() -> FastAPI:
             **(agent.metadata_json or {}),
             "remote_enrolled": bool(remote_enrollment),
             "controller_id": PERIMETR_SYSTEM_ENTITY_ID if remote_enrollment else "",
+            "request_signing_required": bool(
+                remote_enrollment
+                and remote_enrollment.get("request_auth") == "ecdsa-p256-sha256-v1"
+            ),
         }
         db.flush()
         certificate = db.scalar(
@@ -2615,10 +2690,10 @@ def create_app() -> FastAPI:
         return {"items": [{"action": item.action, "title": item.title, "description": item.description, "group": item.group, "risk": item.risk, "inputs": item.inputs, "available": item.available} for item in capabilities]}
 
     @app.post("/api/agents/{agent_id}/heartbeat")
-    def receive_agent_heartbeat(
+    async def receive_agent_heartbeat(
         agent_id: str,
         payload: AgentControlHeartbeatRequest,
-        x_agent_fingerprint: str | None = Header(default=None),
+        request: Request,
         db: Session = Depends(get_db),
     ) -> dict:
         agent = find_agent(db, agent_id)
@@ -2628,11 +2703,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="AGENT_REVOKED")
         if payload.agent_id != agent.id:
             raise HTTPException(status_code=400, detail="AGENT_ID_MISMATCH")
-        if (agent.metadata_json or {}).get("remote_enrolled") and not secrets.compare_digest(
-            x_agent_fingerprint or "",
-            agent.identity_fingerprint,
-        ):
-            raise HTTPException(status_code=403, detail="AGENT_IDENTITY_MISMATCH")
+        await require_agent_callback_authentication(request, agent)
         heartbeat = apply_agent_heartbeat(db, agent=agent, payload=payload.model_dump(mode="python"))
         db.commit()
         return {"accepted": True, "heartbeat_id": heartbeat.id, "status": visible_agent_status(agent)}
@@ -2669,6 +2740,9 @@ def create_app() -> FastAPI:
         db.refresh(job)
         if (agent.metadata_json or {}).get("remote_enrolled"):
             try:
+                controller_identity = ensure_controller_signing_material(
+                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
+                )
                 dispatch_remote_agent_job(
                     base_url=agent.api_base_url,
                     controller_id=PERIMETR_SYSTEM_ENTITY_ID,
@@ -2679,6 +2753,7 @@ def create_app() -> FastAPI:
                     inputs=payload.inputs,
                     created_at=job.created_at,
                     expires_at=job.expires_at,
+                    controller_private_key_pem=controller_identity.private_key_pem,
                 )
                 record_job_event(
                     db,
@@ -2726,19 +2801,15 @@ def create_app() -> FastAPI:
         return get_agent_job(db, agent_id, job_id)
 
     @app.post("/api/agents/{agent_id}/jobs/{job_id}/events", response_model=JobEventRead)
-    def ingest_job_event(
+    async def ingest_job_event(
         agent_id: str,
         job_id: str,
         payload: dict,
-        x_agent_fingerprint: str | None = Header(default=None),
+        request: Request,
         db: Session = Depends(get_db),
     ) -> JobEvent:
         agent = find_agent(db, agent_id)
-        if (agent.metadata_json or {}).get("remote_enrolled") and not secrets.compare_digest(
-            x_agent_fingerprint or "",
-            agent.identity_fingerprint,
-        ):
-            raise HTTPException(status_code=403, detail="AGENT_IDENTITY_MISMATCH")
+        await require_agent_callback_authentication(request, agent)
         event = apply_agent_job_event(db, agent_id=agent_id, job_id=job_id, payload=payload)
         db.commit()
         db.refresh(event)
@@ -2757,6 +2828,9 @@ def create_app() -> FastAPI:
         forwarded = False
         if (agent.metadata_json or {}).get("remote_enrolled"):
             try:
+                controller_identity = ensure_controller_signing_material(
+                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
+                )
                 decide_remote_agent_job(
                     base_url=agent.api_base_url,
                     controller_id=PERIMETR_SYSTEM_ENTITY_ID,
@@ -2767,6 +2841,7 @@ def create_app() -> FastAPI:
                     plan_hash=payload.plan_hash,
                     confirmation_phrase=payload.confirmation_phrase,
                     hostname_confirmation=payload.hostname_confirmation,
+                    controller_private_key_pem=controller_identity.private_key_pem,
                 )
                 forwarded = True
             except AgentTransportError as exc:
@@ -2786,6 +2861,9 @@ def create_app() -> FastAPI:
         forwarded = False
         if (agent.metadata_json or {}).get("remote_enrolled"):
             try:
+                controller_identity = ensure_controller_signing_material(
+                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
+                )
                 decide_remote_agent_job(
                     base_url=agent.api_base_url,
                     controller_id=PERIMETR_SYSTEM_ENTITY_ID,
@@ -2794,6 +2872,7 @@ def create_app() -> FastAPI:
                     decision="rejected",
                     approval_id=payload.approval_id,
                     plan_hash=payload.plan_hash,
+                    controller_private_key_pem=controller_identity.private_key_pem,
                 )
                 forwarded = True
             except AgentTransportError as exc:
@@ -2818,11 +2897,15 @@ def create_app() -> FastAPI:
         forwarded = False
         if (agent.metadata_json or {}).get("remote_enrolled"):
             try:
+                controller_identity = ensure_controller_signing_material(
+                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
+                )
                 cancel_remote_agent_job(
                     base_url=agent.api_base_url,
                     controller_id=PERIMETR_SYSTEM_ENTITY_ID,
                     timeout_seconds=get_settings().perimetr_agent_request_timeout_sec,
                     job_id=job_id,
+                    controller_private_key_pem=controller_identity.private_key_pem,
                 )
                 forwarded = True
             except AgentTransportError as exc:
@@ -2901,7 +2984,11 @@ def create_app() -> FastAPI:
         return {"status": "approval_required", "action": "agent.revoke", "plan": plan, "agent_id": agent.id}
 
     @app.post("/v1/agents/register", response_model=AgentRead, status_code=201)
-    def register_agent(payload: AgentRegisterRequest, db: Session = Depends(get_db)) -> Agent:
+    def register_agent(
+        payload: AgentRegisterRequest,
+        _: SessionLease = Depends(require_core_access),
+        db: Session = Depends(get_db),
+    ) -> Agent:
         existing = db.scalar(select(Agent).where(Agent.host_id == payload.host_id, Agent.identity_fingerprint == payload.identity_fingerprint))
         if existing:
             raise HTTPException(status_code=409, detail="agent already registered")
@@ -2921,7 +3008,12 @@ def create_app() -> FastAPI:
         return agent
 
     @app.post("/v1/agents/{agent_id}/heartbeat", response_model=AgentRead)
-    def heartbeat_agent(agent_id: str, payload: AgentHeartbeatRequest, db: Session = Depends(get_db)) -> Agent:
+    def heartbeat_agent(
+        agent_id: str,
+        payload: AgentHeartbeatRequest,
+        _: SessionLease = Depends(require_core_access),
+        db: Session = Depends(get_db),
+    ) -> Agent:
         agent = get_agent(db, agent_id)
         agent.status = payload.status
         agent.last_heartbeat_at = payload.observed_at
@@ -2952,7 +3044,13 @@ def create_app() -> FastAPI:
         return list_pending_agent_commands(db, agent_id)
 
     @app.post("/v1/agents/{agent_id}/commands/{command_id}/status", response_model=AgentCommandRead)
-    def update_agent_command(agent_id: str, command_id: str, payload: AgentCommandStatusUpdate, db: Session = Depends(get_db)) -> AgentCommand:
+    def update_agent_command(
+        agent_id: str,
+        command_id: str,
+        payload: AgentCommandStatusUpdate,
+        _: SessionLease = Depends(require_core_access),
+        db: Session = Depends(get_db),
+    ) -> AgentCommand:
         get_agent(db, agent_id)
         command = get_command(db, command_id)
         if command.agent_id != agent_id:

@@ -130,7 +130,7 @@ validate_install() {
   }
   database_password=$(get_env PERIMETR_POSTGRES_PASSWORD)
   set_env PERIMETR_DATABASE_URL "postgresql://perimetr:${database_password}@perimetr-db:5432/perimetr"
-  set_env UPDATER_PUBLIC_HEALTH_URL "${public_url%/}/v1/health"
+  set_env UPDATER_PUBLIC_HEALTH_URL ""
 }
 
 install_perimetr() {
