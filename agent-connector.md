@@ -1,5 +1,7 @@
 # Техническое задание
 
+This document specializes [Part 10 — service agents UI and operator workflows](https://github.com/psewdon1m-exocortex/general/blob/8737b50f0aca4b84f4fa223272bdfb63ade05d33/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md); that central contract remains authoritative.
+
 ## Perimetr Agent Control Plane
 
 **Версия документа:** 2.0

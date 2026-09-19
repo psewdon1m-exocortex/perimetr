@@ -1,0 +1,60 @@
+{
+  "schema": "perimetr.unification-inputs.v1",
+  "inspected_on": "2026-09-19",
+  "documentation_revision": "8737b50f0aca4b84f4fa223272bdfb63ade05d33",
+  "source": "workspace .docs working tree (including the updated Part 08)",
+  "files": [
+    {
+      "path": "PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md",
+      "sha256": "e17f3cf444576d2910557a44b17d095465c9870418c12f8b9005920179e614a8"
+    },
+    {
+      "path": "PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md",
+      "sha256": "29abfba38d27e4ae63e7c538e405300870d659d465c26b6cb8121a6d85e30800"
+    },
+    {
+      "path": "PART_02_OBSERVABILITY_AUDIT_AND_LOG_EXPORT.md",
+      "sha256": "eda0ece0f3d5744821a50cd74fd1ccfd17a7e02595bc5fcab2355c5a2a199d51"
+    },
+    {
+      "path": "PART_03_BACKUP_AND_RECOVERY.md",
+      "sha256": "6734c9484b06e33f55b158333eed26a3b00db485586549568bd42dda6afd4450"
+    },
+    {
+      "path": "PART_04_BOOTSTRAP_AND_DEPLOYMENT.md",
+      "sha256": "768f5f4ff3473f5906fea90ef0fe6db74d4d6b3b017dc00ea5556d0c9e310696"
+    },
+    {
+      "path": "PART_05_CI_RELEASES_AND_LOCAL_UPDATES.md",
+      "sha256": "6bda1858551afc7d4b4fd04d7dc70678fb6e5826ba353c6a9a11e63430db9252"
+    },
+    {
+      "path": "PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md",
+      "sha256": "6535e2fdda71873d656a98ec851161f5d98a48075025d82f6c8a7f68910158cc"
+    },
+    {
+      "path": "PART_07_SECURITY_AND_EXPOSURE_CONTROL.md",
+      "sha256": "0eeb1b476ad45ea2d0ef48f0d0881e51006db66560684406c58f0d1dec495d5c"
+    },
+    {
+      "path": "PART_08_SEO_AND_GEO.md",
+      "sha256": "d7f962c739f40544dfb0ac604c42f3c4f2ff128e8b4a4d35933eaed4ce860a09"
+    },
+    {
+      "path": "PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md",
+      "sha256": "5aa0c2a2b8b90c3db2f9240c74f5d3d23059b9089cbb7988237cf9b98aa65461"
+    },
+    {
+      "path": "PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md",
+      "sha256": "4e17368515d9cefa58a191205e4abcc733fcb9d3797109b15cc881eb37a914ac"
+    },
+    {
+      "path": "PART_11_INITIAL_MULTI_SERVICE_DEPLOYMENT.md",
+      "sha256": "0a9d641aaa566aaa71e88f54355c01cbd2b9eea5ac6369d70bb91dbac668c4b1"
+    },
+    {
+      "path": "PART_12_KNOWN_DEPLOYMENT_AND_OPERATIONS_PROBLEMS.md",
+      "sha256": "a66eb1e6942874e506975a7708cec6a0bf6f1fe8969a04c341bcd271d2f1cacd"
+    }
+  ]
+}

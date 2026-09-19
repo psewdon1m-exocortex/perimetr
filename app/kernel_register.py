@@ -15,6 +15,10 @@ from .pod_artifacts import pod_discovery_url
 
 SNAPSHOT_SCHEMA = "exocortex.register.snapshot.v1"
 REVISION_PATTERN = re.compile(r"^register-[A-Za-z0-9-]+$")
+VOLT_REFERENCE_PATTERN = re.compile(
+    r"^volt://[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/(?:[1-9][0-9]*|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
 
 
 class KernelRegisterError(RuntimeError):
@@ -73,32 +77,14 @@ def _write_cache(path: Path, snapshot: dict[str, Any]) -> None:
             temporary.unlink()
 
 
-def _registered_kernel_url(snapshot: dict[str, Any], bootstrap_url: str) -> str:
-    parsed = urlparse(bootstrap_url)
-    if parsed.scheme not in {"http", "https"}:
-        raise KernelRegisterError("KERNEL_URL must use http or https")
-    values = snapshot["values"]
-    sni = _required_string(values, "services.kernel.sni")
-    port = _required_port(values, "services.kernel.port")
-    check = urlparse(f"http://{sni}")
-    if not check.hostname or check.port is not None or check.path not in {"", "/"}:
-        raise KernelRegisterError("Kernel Register services.kernel.sni is invalid")
-    host = f"[{sni}]" if ":" in sni and not sni.startswith("[") else sni
-    return parsed._replace(
-        netloc=f"{host}:{port}",
-        path="",
-        params="",
-        query="",
-        fragment="",
-    ).geturl()
-
-
 def load_snapshot(
     *,
     kernel_url: str,
     service_token: str,
     cache_path: str,
     timeout_seconds: float,
+    require_fresh: bool = False,
+    persist_cache: bool = True,
 ) -> dict[str, Any]:
     cache = Path(cache_path)
     if not kernel_url and not service_token:
@@ -118,13 +104,6 @@ def load_snapshot(
     if cached:
         headers["If-None-Match"] = f'"{cached["revision"]}"'
     urls = [kernel_url.rstrip("/")]
-    if cached:
-        try:
-            registered_url = _registered_kernel_url(cached, kernel_url).rstrip("/")
-            if registered_url != urls[0]:
-                urls.insert(0, registered_url)
-        except KernelRegisterError:
-            pass
     last_error: Exception | None = None
     for remote_url in urls:
         request = Request(
@@ -138,7 +117,8 @@ def load_snapshot(
                 if len(body) > 3 * 1024 * 1024:
                     raise KernelRegisterError("Kernel Register response is too large")
                 snapshot = _verify_snapshot(json.loads(body.decode("utf-8")))
-                _write_cache(cache, snapshot)
+                if persist_cache:
+                    _write_cache(cache, snapshot)
                 return snapshot
         except HTTPError as remote_error:
             if remote_error.code == 304 and cached:
@@ -152,7 +132,7 @@ def load_snapshot(
             KernelRegisterError,
         ) as remote_error:
             last_error = remote_error
-    if cached:
+    if cached and not require_fresh:
         return cached
     raise KernelRegisterError(
         "Kernel unavailable and no valid Register last-known-good cache exists"
@@ -207,8 +187,46 @@ def _required_port(values: dict[str, Any], key: str) -> int:
     return port
 
 
-def apply_register(settings):
-    snapshot = load_snapshot(
+def resolve_values(*, kernel_url: str, service_token: str, keys: list[str], timeout_seconds: float) -> dict[str, str]:
+    request = Request(
+        f"{kernel_url.rstrip('/')}/api/v1/register/resolve",
+        data=json.dumps({"keys": keys}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {service_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read(1024 * 1024 + 1)
+        if len(body) > 1024 * 1024:
+            raise KernelRegisterError("Kernel resolution response is too large")
+        payload = json.loads(body.decode("utf-8"))
+        if payload.get("schema") != "exocortex.register.resolution.v1":
+            raise KernelRegisterError("unsupported Kernel resolution schema")
+        resolved = {key: payload["values"][key]["value"] for key in keys}
+        if any(not isinstance(value, str) for value in resolved.values()):
+            raise KernelRegisterError("unsupported Kernel resolution response")
+        return resolved
+    except (HTTPError, URLError, TimeoutError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise KernelRegisterError("Kernel value resolution failed") from exc
+
+
+def _replace_resolved(values: dict[str, Any], resolved: dict[str, str]) -> dict[str, Any]:
+    copied = json.loads(json.dumps(values))
+    for key, value in resolved.items():
+        cursor = copied
+        parts = key.split(".")
+        for part in parts[:-1]:
+            cursor = cursor[part]
+        cursor[parts[-1]] = value
+    return copied
+
+
+def apply_register(settings, *, snapshot=None):
+    snapshot = snapshot if snapshot is not None else load_snapshot(
         kernel_url=settings.kernel_url,
         service_token=settings.kernel_service_token,
         cache_path=settings.kernel_cache_path,
@@ -216,7 +234,24 @@ def apply_register(settings):
     )
     if not snapshot:
         return settings
-    values = snapshot["values"]
+    stored_values = snapshot["values"]
+    keys = [
+        "repositories.perimetr.url",
+        "repositories.pod.url",
+        "services.perimetr.sni",
+        "services.perimetr.port",
+        "intervals.kernel.refresh_sec",
+    ]
+    for key in keys:
+        reference = _resolve(stored_values, key)
+        if not isinstance(reference, str) or not VOLT_REFERENCE_PATTERN.fullmatch(reference):
+            raise KernelRegisterError(f"Kernel Register key {key} must use volt://<entry-id>/<field-id>")
+    values = _replace_resolved(stored_values, resolve_values(
+        kernel_url=settings.kernel_url,
+        service_token=settings.kernel_service_token,
+        keys=keys,
+        timeout_seconds=settings.kernel_timeout_sec,
+    ))
 
     settings.perimetr_repository_url = _required_url(
         values, "repositories.perimetr.url"

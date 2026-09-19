@@ -23,3 +23,9 @@ pod-runtime/*.zip
 *.pem
 *.key
 *.crt
+.release-evidence/
+known-problems-report.json
+.pre-push-gate-report.json
+node_modules/
+
+.tmp-image.json

@@ -29,7 +29,7 @@ def test_empty_database_upgrades_to_numbered_head(tmp_path: Path) -> None:
         assert "objects" in tables
         assert "system_settings" in tables
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0005"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0006"
             pod_columns = {column["name"] for column in inspect(engine).get_columns("pods")}
             provisioning_columns = {
                 column["name"]
@@ -81,9 +81,9 @@ def test_existing_current_schema_is_adopted_and_plaintext_password_is_hashed(
             )
             auth = dict((setting.value if setting else {}).get("auth") or {})
             assert "password" not in auth
-            assert is_password_hash(str(auth.get("password_hash") or ""))
+            assert is_password_hash(str(auth.get("access_key_hash") or ""))
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0005"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0006"
     finally:
         engine.dispose()
 

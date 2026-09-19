@@ -18,6 +18,7 @@ RUN groupadd --gid 10001 perimetr \
     && chown -R perimetr:perimetr /app /opt/perimetr
 
 COPY --chown=perimetr:perimetr alembic.ini ./
+COPY --chown=perimetr:perimetr VERSION ./
 COPY --chown=perimetr:perimetr migrations ./migrations
 COPY --chown=perimetr:perimetr app ./app
 COPY --chown=perimetr:perimetr pod-runtime /opt/perimetr/pod-runtime
@@ -29,4 +30,4 @@ EXPOSE 18080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('PERIMETR_LISTEN_PORT','18080')+'/v1/health',timeout=3).read()"
 
-CMD ["sh", "-c", "exec uvicorn app.api_service.app:create_app --factory --host 0.0.0.0 --port ${PERIMETR_LISTEN_PORT:-18080} --proxy-headers --forwarded-allow-ips='*'"]
+CMD ["sh", "-c", "exec uvicorn app.api_service.app:create_app --factory --host 0.0.0.0 --port ${PERIMETR_LISTEN_PORT:-18080} --workers 1 --no-proxy-headers --no-server-header --no-access-log"]

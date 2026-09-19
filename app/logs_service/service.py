@@ -1,99 +1,78 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import String, LargeBinary, cast, delete, func, select
 from sqlalchemy.orm import Session
 
 from ..models import AuditEvent
+from ..redaction import bounded
 from ..settings import Settings
+
+_file_lock = threading.Lock()
 
 
 def trim_audit_events(db: Session, settings: Settings) -> None:
-    max_entries = max(int(settings.perimetr_audit_max_entries), 1)
-    retention_days = max(int(settings.perimetr_audit_retention_days), 1)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(settings.perimetr_audit_retention_days, 1))
     db.execute(delete(AuditEvent).where(AuditEvent.created_at < cutoff))
-    stale_events = db.scalars(
-        select(AuditEvent)
-        .order_by(AuditEvent.created_at.desc())
-        .offset(max_entries)
-    ).all()
-    for stale in stale_events:
-        db.delete(stale)
+    payload = cast(AuditEvent.payload, String)
+    result = cast(AuditEvent.result, String)
+    byte_length = (lambda value: func.octet_length(value)) if db.bind.dialect.name == "postgresql" else (lambda value: func.length(cast(value, LargeBinary)))
+    size = byte_length(payload) + byte_length(result) + 4096
+    used, count, stale = 0, 0, []
+    for event_id, length in db.execute(select(AuditEvent.id, size).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).execution_options(yield_per=200)):
+        count += 1
+        used += length
+        if count > settings.perimetr_audit_max_entries or used > settings.perimetr_audit_max_bytes:
+            stale.append(event_id)
+    for start in range(0, len(stale), 200):
+        db.execute(delete(AuditEvent).where(AuditEvent.id.in_(stale[start:start + 200])))
 
 
-def _entity_log_key(event: AuditEvent) -> str:
-    return f"{event.target_type}_{event.target_id}"
+def serialize(event: AuditEvent) -> dict:
+    return bounded({"id": event.id, "created_at": event.created_at.isoformat(),
+                    "actor": f"{event.actor_type}:{event.actor_id}", "action": event.action,
+                    "target": f"{event.target_type}:{event.target_id}",
+                    "payload": event.payload, "result": event.result})
 
 
 def write_audit_log(settings: Settings, event: AuditEvent) -> None:
     log_dir = Path(settings.perimetr_logs_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "id": event.id,
-        "actor_type": event.actor_type,
-        "actor_id": event.actor_id,
-        "action": event.action,
-        "target_type": event.target_type,
-        "target_id": event.target_id,
-        "payload": event.payload,
-        "result": event.result,
-        "created_at": event.created_at.isoformat(),
-    }
-    for path in [log_dir / "audit.jsonl", log_dir / f"{_entity_log_key(event)}.jsonl"]:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        trim_log_file(
-            path,
-            max_lines=max(int(settings.perimetr_audit_max_entries), 1),
-            max_bytes=max(int(settings.perimetr_log_max_file_bytes), 1024),
-        )
-    trim_log_directory(
-        log_dir,
-        retention_days=max(int(settings.perimetr_audit_retention_days), 1),
-        max_total_bytes=max(int(settings.perimetr_logs_max_total_bytes), 1024),
-    )
+    line = (json.dumps(serialize(event), ensure_ascii=True) + "\n").encode()
+    path = log_dir / "audit.jsonl"
+    with _file_lock:
+        if path.exists() and path.stat().st_size + len(line) > settings.perimetr_log_max_file_bytes:
+            path.replace(log_dir / f"audit-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}.jsonl")
+        with path.open("ab") as handle:
+            handle.write(line)
+        trim_log_directory(log_dir, retention_days=settings.perimetr_audit_retention_days,
+                           max_total_bytes=settings.perimetr_logs_max_total_bytes)
 
 
 def trim_log_file(path: Path, *, max_lines: int, max_bytes: int) -> None:
-    if not path.exists():
-        return
-    lines = path.read_bytes().splitlines(keepends=True)
-    if len(lines) <= max_lines and sum(len(line) for line in lines) <= max_bytes:
-        return
-    retained: list[bytes] = []
-    retained_bytes = 0
-    for line in reversed(lines[-max_lines:]):
-        if len(line) > max_bytes:
-            continue
-        if retained and retained_bytes + len(line) > max_bytes:
-            break
-        retained.append(line)
-        retained_bytes += len(line)
-    path.write_bytes(b"".join(reversed(retained)))
+    from collections import deque
+    retained, total = deque(), 0
+    with path.open("rb") as handle:
+        for line in handle:
+            if len(line) > max_bytes:
+                continue
+            retained.append(line)
+            total += len(line)
+            while len(retained) > max_lines or total > max_bytes:
+                total -= len(retained.popleft())
+    path.write_bytes(b"".join(retained))
 
 
 def trim_log_directory(log_dir: Path, *, retention_days: int, max_total_bytes: int) -> None:
-    if not log_dir.exists():
-        return
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max(retention_days, 1))
-    paths = [path for path in log_dir.glob("*.jsonl") if path.is_file()]
-    for path in paths:
-        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-        if modified < cutoff:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(retention_days, 1))).timestamp()
+    files = sorted((p for p in log_dir.glob("*.jsonl") if p.is_file() and not p.is_symlink()), key=lambda p: (p.name == "audit.jsonl", p.stat().st_mtime))
+    total = sum(p.stat().st_size for p in files)
+    for path in files:
+        info = path.stat()
+        if info.st_mtime < cutoff or total > max_total_bytes:
             path.unlink(missing_ok=True)
-    paths = [path for path in log_dir.glob("*.jsonl") if path.is_file()]
-    total_bytes = sum(path.stat().st_size for path in paths)
-    if total_bytes <= max_total_bytes:
-        return
-    # Keep the aggregate audit stream until entity-specific history has been removed.
-    paths.sort(key=lambda path: (path.name == "audit.jsonl", path.stat().st_mtime))
-    for path in paths:
-        if total_bytes <= max_total_bytes:
-            break
-        size = path.stat().st_size
-        path.unlink(missing_ok=True)
-        total_bytes -= size
+            total -= info.st_size

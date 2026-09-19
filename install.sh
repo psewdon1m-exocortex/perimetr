@@ -10,7 +10,7 @@ require_root() {
 }
 
 get_env_from() {
-  sed -n "s/^$2=//p" "$1" | tail -n 1
+  python3 "$INSTALL_DIR/scripts/installer-env.py" get "$1" "$2"
 }
 
 get_env() {
@@ -18,17 +18,7 @@ get_env() {
 }
 
 set_env() {
-  key=$1
-  value=$2
-  temporary="$ENV_FILE.tmp"
-  awk -v key="$key" -v value="$value" '
-    BEGIN { found = 0 }
-    index($0, key "=") == 1 { print key "=" value; found = 1; next }
-    { print }
-    END { if (!found) print key "=" value }
-  ' "$ENV_FILE" >"$temporary"
-  chmod 0600 "$temporary"
-  mv "$temporary" "$ENV_FILE"
+  python3 "$INSTALL_DIR/scripts/installer-env.py" set "$ENV_FILE" "$1" "$2"
 }
 
 needs_generation() {
@@ -51,23 +41,6 @@ install_command() {
   chmod 0755 "$wrapper"
 }
 
-copy_local_kernel_bootstrap() {
-  kernel_env=/opt/exocortex/kernel/.env
-  [ -r "$kernel_env" ] || return 0
-  current_url=$(get_env KERNEL_URL)
-  current_token=$(get_env KERNEL_SERVICE_TOKEN)
-  case "$current_url" in ""|*CHANGE_ME*|*.example.com*)
-    local_url=$(get_env_from "$kernel_env" KERNEL_URL)
-    [ -n "$local_url" ] && set_env KERNEL_URL "$local_url"
-    ;;
-  esac
-  case "$current_token" in ""|CHANGE_ME|replace-*)
-    local_token=$(get_env_from "$kernel_env" KERNEL_SERVICE_TOKEN)
-    [ -n "$local_token" ] && set_env KERNEL_SERVICE_TOKEN "$local_token"
-    ;;
-  esac
-}
-
 prepare() {
   require_root
   command -v openssl >/dev/null 2>&1 || {
@@ -77,6 +50,7 @@ prepare() {
   if [ ! -f "$ENV_FILE" ]; then
     cp "$INSTALL_DIR/.env.example" "$ENV_FILE"
   fi
+  [ ! -L "$ENV_FILE" ] || { echo "Refusing a symlink environment." >&2; exit 2; }
   chmod 0600 "$ENV_FILE"
   needs_generation PERIMETR_POSTGRES_PASSWORD && set_env PERIMETR_POSTGRES_PASSWORD "$(random_hex 32)"
   database_password=$(get_env PERIMETR_POSTGRES_PASSWORD)
@@ -90,7 +64,6 @@ prepare() {
   if [ -n "${PERIMETR_RELEASE_IMAGE:-}" ]; then
     set_env PERIMETR_IMAGE "$PERIMETR_RELEASE_IMAGE"
   fi
-  copy_local_kernel_bootstrap
   install_command
   echo "Perimetr files are prepared in $INSTALL_DIR"
   echo "Edit only the OPERATOR INPUT section in $ENV_FILE"
@@ -98,7 +71,8 @@ prepare() {
 }
 
 validate_install() {
-  [ -f "$ENV_FILE" ] || { echo "Run the Perimetr bootstrap command first." >&2; exit 2; }
+  [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] || { echo "Run the Perimetr bootstrap command first." >&2; exit 2; }
+  [ "$(stat -c %u "$ENV_FILE")" = 0 ] && [ "$(stat -c %a "$ENV_FILE")" = 600 ] || { echo "Perimetr .env must be root-owned with mode 0600." >&2; exit 2; }
   for command in docker curl openssl; do
     command -v "$command" >/dev/null 2>&1 || {
       echo "$command is required. Prepare the VPS with Sindri first." >&2
@@ -106,20 +80,15 @@ validate_install() {
     }
   done
   docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required." >&2; exit 3; }
-  username=$(get_env PERIMETR_DIRECT_USERNAME)
-  password=$(get_env PERIMETR_ENTRY_PASSWORD)
-  public_url=$(get_env PERIMETR_URL)
+  public_url=$(get_env PERIMETR_PUBLIC_URL)
   kernel_url=$(get_env KERNEL_URL)
   kernel_token=$(get_env KERNEL_SERVICE_TOKEN)
   image=$(get_env PERIMETR_IMAGE)
-  case "$username" in ""|CHANGE_ME|admin) echo "Set PERIMETR_DIRECT_USERNAME in .env." >&2; exit 2 ;; esac
-  case "$password" in ""|CHANGE_ME|replace-*|perimetr-entry-password) echo "Set PERIMETR_ENTRY_PASSWORD in .env." >&2; exit 2 ;; esac
-  [ "${#password}" -ge 12 ] || { echo "PERIMETR_ENTRY_PASSWORD must contain at least 12 characters." >&2; exit 2; }
-  case "$public_url" in https://*.*) ;; *) echo "PERIMETR_URL must be the public HTTPS URL." >&2; exit 2 ;; esac
-  case "$public_url" in *CHANGE_ME*|*.example.com*) echo "Replace the example PERIMETR_URL." >&2; exit 2 ;; esac
+  case "$public_url" in https://*.*) ;; *) echo "PERIMETR_PUBLIC_URL must be the public HTTPS URL." >&2; exit 2 ;; esac
+  case "$public_url" in *CHANGE_ME*|*.example.com*) echo "Replace the example PERIMETR_PUBLIC_URL." >&2; exit 2 ;; esac
   case "$kernel_url" in https://*.*) ;; *) echo "KERNEL_URL must be the public HTTPS Kernel URL." >&2; exit 2 ;; esac
   case "$kernel_url" in *CHANGE_ME*|*.example.com*) echo "Replace the example KERNEL_URL." >&2; exit 2 ;; esac
-  [ "${#kernel_token}" -ge 24 ] || { echo "Copy KERNEL_SERVICE_TOKEN from Kernel into .env." >&2; exit 2; }
+  [ "${#kernel_token}" -ge 24 ] || { echo "Set the dedicated Kernel service credential in .env." >&2; exit 2; }
   printf '%s' "$image" | grep -Eq '^ghcr\.io/.+@sha256:[a-f0-9]{64}$' || {
     echo "PERIMETR_IMAGE was not populated from a valid release." >&2
     exit 2
@@ -131,6 +100,9 @@ validate_install() {
   database_password=$(get_env PERIMETR_POSTGRES_PASSWORD)
   set_env PERIMETR_DATABASE_URL "postgresql://perimetr:${database_password}@perimetr-db:5432/perimetr"
   set_env UPDATER_PUBLIC_HEALTH_URL ""
+  # Hash before Compose parses the environment: the initial key is exact text,
+  # including dollar signs and newlines. The database wins after initialization.
+  python3 "$INSTALL_DIR/scripts/installer-env.py" seed "$ENV_FILE"
 }
 
 install_perimetr() {
@@ -139,12 +111,13 @@ install_perimetr() {
   cd "$INSTALL_DIR"
   "$INSTALL_DIR/updater/install.sh" perimetr "$ENV_FILE" "$INSTALL_DIR/updater/updater-linux-amd64"
   docker compose --env-file "$ENV_FILE" -f compose.production.yaml config -q
+  docker compose --env-file "$ENV_FILE" -f compose.production.yaml run --rm --no-deps perimetr-api python -m app.install_validation
   docker compose --env-file "$ENV_FILE" -f compose.production.yaml up -d
   port=$(get_env PERIMETR_LISTEN_PORT)
   port=${port:-18080}
   for _ in $(seq 1 45); do
-    if curl -fsS --max-time 3 "http://127.0.0.1:$port/v1/health" >/dev/null; then
-      echo "Perimetr is healthy at $(get_env PERIMETR_URL)"
+    if curl -fsS --max-time 3 "http://127.0.0.1:$port/v1/health" | python3 -c 'import json,sys; result=json.load(sys.stdin); sys.exit(0 if result.get("status")=="ok" and result.get("version")==sys.argv[1] else 1)' "$(get_env PERIMETR_VERSION)"; then
+      echo "Perimetr is healthy at $(get_env PERIMETR_PUBLIC_URL)"
       return 0
     fi
     sleep 2
@@ -162,5 +135,12 @@ case "$ACTION" in
     cd "$INSTALL_DIR"
     docker compose --env-file "$ENV_FILE" -f compose.production.yaml ps
     ;;
-  *) echo "Usage: perimetr-install [install|prepare|status]" >&2; exit 2 ;;
+  sync-kernel)
+    require_root
+    cd "$INSTALL_DIR"
+    docker compose --env-file "$ENV_FILE" -f compose.production.yaml exec -T perimetr-api python -m app.kernel_connection export-for-installer | python3 "$INSTALL_DIR/scripts/sync-kernel-env.py" "$ENV_FILE"
+    docker compose --env-file "$ENV_FILE" -f compose.production.yaml exec -T perimetr-api python -m app.kernel_connection synced
+    echo "The host Updater will read the synchronized Kernel connection on its next request."
+    ;;
+  *) echo "Usage: perimetr-install [install|prepare|status|sync-kernel]" >&2; exit 2 ;;
 esac

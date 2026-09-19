@@ -8,8 +8,12 @@ from pathlib import Path
 TEST_DATABASE_PATH = Path(__file__).parent / "test_perimetr.db"
 os.environ["PERIMETR_DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH.as_posix()}"
 os.environ["PERIMETR_ENV"] = "development"
+os.environ["PERIMETR_ACCESS_KEY"] = "perimetr-entry-password"
 os.environ["PERIMETR_PUBLIC_URL"] = "http://localhost:18080"
 os.environ["PERIMETR_SESSION_TTL_SEC"] = "3600"
+os.environ["PERIMETR_AUDIT_MAX_ENTRIES"] = "10000"
+os.environ["PERIMETR_POD_VERSION"] = "0.1.3"
+os.environ["PERIMETR_LOGS_DIR"] = str(Path(__file__).resolve().parent.parent / ".tmp" / "test-logs")
 os.environ["PERIMETR_POD_BUNDLE_SOURCE"] = "/tmp/perimetr-pod-test-bundle"
 os.environ["PERIMETR_POD_CACHE_DIR"] = "/tmp/perimetr-pod-test-cache"
 os.environ["KERNEL_URL"] = ""

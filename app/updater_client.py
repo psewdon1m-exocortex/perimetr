@@ -16,6 +16,8 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.socket_path = socket_path
 
     def connect(self) -> None:
+        if not hasattr(socket, "AF_UNIX"):
+            raise UpdaterUnavailable("The local Updater requires a Linux host")
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.settimeout(self.timeout)
         try:
@@ -68,11 +70,11 @@ def status(socket_path: str) -> dict[str, Any]:
             "available": True,
             **request(socket_path, "GET", "/v1/health"),
         }
-    except UpdaterUnavailable as exc:
+    except (UpdaterUnavailable, OSError, RuntimeError):
         return {
-            "installed": False,
+            "installed": None,
             "available": False,
             "status": "unavailable",
             "service": "updater",
-            "message": str(exc),
+            "message": "Updater socket is unreachable; installation state is unknown",
         }

@@ -23,10 +23,8 @@ services:
       KERNEL_CACHE_PATH: /app/.tmp/kernel-cache/register.snapshot.json
       UPDATER_SOCKET_PATH: /run/exocortex/updater.sock
     ports:
-      - "${PERIMETR_LISTEN_PORT:-18080}:${PERIMETR_LISTEN_PORT:-18080}"
+      - "127.0.0.1:${PERIMETR_LISTEN_PORT:-18080}:${PERIMETR_LISTEN_PORT:-18080}"
     volumes:
-      - ./config:/app/config
-      - ./.docs:/app/.docs
       - ./.tmp:/app/.tmp
       - ./app:/app/app
       - ./tests:/app/tests
@@ -36,11 +34,9 @@ services:
         condition: service_completed_successfully
       perimetr-db:
         condition: service_healthy
-      perimetr-cache:
-        condition: service_healthy
 
   perimetr-db:
-    image: postgres:16-alpine
+    image: postgres@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
     environment:
       POSTGRES_DB: perimetr
       POSTGRES_USER: perimetr
@@ -54,12 +50,5 @@ services:
       retries: 10
       start_period: 10s
 
-  perimetr-cache:
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
 volumes:
   perimetr_db_data:

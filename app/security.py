@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 import base64
 import hashlib
+import hmac
 from pathlib import Path
 import re
 import secrets
@@ -21,7 +22,6 @@ SCRYPT_P = 1
 SCRYPT_DKLEN = 64
 SCRYPT_MAXMEM = 64 * 1024 * 1024
 PASSWORD_PREFIX = "scrypt"
-USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 PLACEHOLDER_MARKERS = (
     "change-this",
     "replace-with",
@@ -53,7 +53,11 @@ def hash_password(password: str) -> str:
 
 
 def is_password_hash(value: str) -> bool:
-    return isinstance(value, str) and value.startswith(f"{PASSWORD_PREFIX}$")
+    try:
+        algorithm, salt, digest = value.split("$")
+        return algorithm == PASSWORD_PREFIX and len(_decode(salt)) == 16 and len(_decode(digest)) == SCRYPT_DKLEN
+    except (AttributeError, ValueError, TypeError):
+        return False
 
 
 def verify_password(password: str, encoded: str) -> bool:
@@ -63,6 +67,8 @@ def verify_password(password: str, encoded: str) -> bool:
             return False
         salt = _decode(salt_value)
         expected = _decode(expected_value)
+        if len(salt) != 16 or len(expected) != SCRYPT_DKLEN:
+            return False
         actual = hashlib.scrypt(
             password.encode("utf-8"),
             salt=salt,
@@ -91,18 +97,12 @@ def validate_runtime_settings(settings: Any) -> None:
         return
 
     issues: list[str] = []
-    username = str(settings.perimetr_direct_username)
-    password = str(settings.perimetr_entry_password)
     signing_secret = str(settings.perimetr_pod_signing_secret)
     kernel_token = str(settings.kernel_service_token)
     updater_token = str(settings.updater_control_token)
 
-    if not USERNAME_PATTERN.fullmatch(username):
-        issues.append(
-            "PERIMETR_DIRECT_USERNAME must contain 3-64 letters, numbers, dots, underscores or hyphens"
-        )
-    if len(password) < 12 or _is_placeholder(password):
-        issues.append("PERIMETR_ENTRY_PASSWORD must contain at least 12 non-placeholder characters")
+    # Access-Key presence is checked against the authoritative database at
+    # initialization. Transport/machine-secret rules never apply to its text.
     if len(signing_secret) < 32 or _is_placeholder(signing_secret):
         issues.append("PERIMETR_POD_SIGNING_SECRET must contain at least 32 non-placeholder characters")
     if len(kernel_token) < 24 or _is_placeholder(kernel_token):
@@ -141,6 +141,10 @@ def validate_runtime_settings(settings: Any) -> None:
 
     if issues:
         raise RuntimeError("; ".join(issues))
+
+
+def csrf_token(session_key_hash: str) -> str:
+    return hmac.new(session_key_hash.encode("ascii"), b"perimetr.csrf.v1", hashlib.sha256).hexdigest()
 
 
 @dataclass(frozen=True)

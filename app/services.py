@@ -5,6 +5,8 @@ from hashlib import sha256
 import secrets
 import shutil
 import time
+import os
+from pathlib import Path
 from typing import TypeVar
 
 from fastapi import HTTPException
@@ -36,6 +38,8 @@ from .models import (
     SystemSetting,
 )
 from .settings import Settings
+from .operator_settings import ensure_preferences, update_preferences
+from .redaction import bounded, text as redact_text
 from .security import (
     constant_time_text_equal,
     hash_password,
@@ -46,6 +50,7 @@ from .security import (
 T = TypeVar("T")
 
 PERIMETR_SYSTEM_ENTITY_ID = "5f0b6d3d90f548a9a2f1d6e9cb7f3412"
+PROCESS_STARTED = time.monotonic()
 
 
 def now_utc() -> datetime:
@@ -130,54 +135,24 @@ def audit(
     result: dict | None = None,
 ) -> AuditEvent:
     event = AuditEvent(
-        actor_type=actor_type,
-        actor_id=actor_id,
-        action=action,
-        target_type=target_type,
-        target_id=target_id,
-        payload=payload or {},
-        result=result or {},
+        actor_type=redact_text(actor_type)[:64],
+        actor_id=redact_text(actor_id)[:128],
+        action=redact_text(action)[:128],
+        target_type=redact_text(target_type)[:64],
+        target_id=redact_text(target_id)[:128],
+        payload=bounded(payload or {}, 7000),
+        result=bounded(result or {}, 7000),
     )
     db.add(event)
     db.flush()
     settings = Settings()
     trim_audit_events(db, settings)
-    write_audit_log(settings, event)
+    db.info.setdefault("audit_file_events", []).append((settings, event))
     return event
 
 
 def ensure_perimetr_system_settings(db: Session, settings: Settings) -> None:
-    defaults = {
-        "theme": {"dark": "#000000", "light": "#ffffff", "accent": "#00a8ff"},
-        "sidebar": {"auto_hide": True},
-        "backup": {"include_audit": True, "include_sessions": True},
-        "auth": {
-            "username": settings.perimetr_direct_username,
-            "direct_enabled": settings.perimetr_direct_auth_enabled,
-        },
-    }
-    setting = db.scalar(select(SystemSetting).where(SystemSetting.key == "perimetr.preferences"))
-    if setting is None:
-        defaults["auth"]["password_hash"] = hash_password(settings.perimetr_entry_password)
-        db.add(SystemSetting(scope="perimetr", key="perimetr.preferences", value=defaults))
-        db.flush()
-        return
-    current = dict(setting.value or {})
-    current.setdefault("auth", defaults["auth"])
-    auth = dict(current["auth"])
-    auth.setdefault("username", defaults["auth"]["username"])
-    legacy_password = str(auth.pop("password", "") or "")
-    stored_hash = str(auth.get("password_hash", "") or "")
-    if not is_password_hash(stored_hash):
-        auth["password_hash"] = hash_password(
-            legacy_password or settings.perimetr_entry_password
-        )
-    auth["direct_enabled"] = True
-    current["auth"] = auth
-    current.setdefault("theme", defaults["theme"])
-    current.setdefault("sidebar", defaults["sidebar"])
-    current.setdefault("backup", defaults["backup"])
-    setting.value = current
+    ensure_preferences(db, settings)
 
 
 def get_perimetr_preferences(db: Session, settings: Settings) -> dict:
@@ -188,16 +163,7 @@ def get_perimetr_preferences(db: Session, settings: Settings) -> dict:
 
 
 def update_perimetr_preferences(db: Session, settings: Settings, value: dict) -> dict:
-    current = get_perimetr_preferences(db, settings)
-    next_value = {
-        **current,
-        **{key: val for key, val in value.items() if key in {"theme", "sidebar", "backup"}},
-    }
-    setting = db.scalar(select(SystemSetting).where(SystemSetting.key == "perimetr.preferences"))
-    assert setting is not None
-    setting.value = next_value
-    db.flush()
-    return dict(setting.value)
+    return update_preferences(db, settings, value)
 
 
 CORRELATION_STATE_KEY = "perimetr.correlation_map"
@@ -334,36 +300,38 @@ def update_correlation_state(db: Session, value: dict) -> dict:
     return {**next_value, "correlation_percentage": correlation_percentage(db, next_value)}
 
 
-def update_direct_password(
+def update_access_key(
     db: Session,
     settings: Settings,
     *,
-    current_password: str,
-    new_password: str,
-    confirm_password: str,
+    current_key: str,
+    new_key: str,
+    confirm_key: str,
+    current_session: SessionLease,
 ) -> None:
-    if new_password != confirm_password:
-        raise HTTPException(status_code=400, detail="new_password_confirmation_mismatch")
-    if len(new_password) < 12:
-        raise HTTPException(status_code=400, detail="new_password_too_short")
+    if new_key == "" or new_key != confirm_key:
+        raise HTTPException(status_code=400, detail="Supply the same new Access Key twice")
     preferences = get_perimetr_preferences(db, settings)
     auth = dict(preferences.get("auth") or {})
-    stored_hash = str(auth.get("password_hash") or "")
-    if not verify_password(current_password, stored_hash):
-        raise HTTPException(status_code=403, detail="current_password_invalid")
-    auth.pop("password", None)
-    auth["password_hash"] = hash_password(new_password)
-    auth["direct_enabled"] = True
+    stored_hash = str(auth.get("access_key_hash") or "")
+    if not verify_password(current_key, stored_hash):
+        raise HTTPException(status_code=403, detail="Current Access Key is incorrect")
+    auth = {"access_key_hash": hash_password(new_key)}
     preferences["auth"] = auth
     setting = db.scalar(select(SystemSetting).where(SystemSetting.key == "perimetr.preferences"))
     assert setting is not None
     setting.value = preferences
     now = now_utc()
     for lease in db.scalars(
-        select(SessionLease).where(SessionLease.status == SessionStatus.active.value)
+        select(SessionLease).where(SessionLease.status == SessionStatus.active.value, SessionLease.transport == "direct")
     ).all():
-        lease.status = SessionStatus.revoked.value
-        lease.ended_at = now
+        if lease.id != current_session.id:
+            lease.status = SessionStatus.revoked.value
+            lease.ended_at = now
+    session_key = secrets.token_urlsafe(32)
+    current_session.session_key_hash = hash_session_key(session_key)
+    current_session.expires_at = now + timedelta(seconds=settings.perimetr_session_ttl_sec)
+    setattr(current_session, "_plain_session_key", session_key)
     db.flush()
 
 
@@ -374,18 +342,11 @@ def normalize_access_target(target: str) -> str:
     return value
 
 
-def verify_direct_login(db: Session, settings: Settings, *, target: str, username: str, password: str) -> bool:
+def verify_direct_login(db: Session, settings: Settings, *, target: str, access_key: str) -> bool:
     normalize_access_target(target)
     preferences = get_perimetr_preferences(db, settings)
     auth = dict(preferences.get("auth") or {})
-    if not bool(auth.get("direct_enabled", settings.perimetr_direct_auth_enabled)):
-        return False
-    if not constant_time_text_equal(
-        username,
-        str(auth.get("username", settings.perimetr_direct_username)),
-    ):
-        return False
-    return verify_password(password, str(auth.get("password_hash") or ""))
+    return access_key != "" and verify_password(access_key, str(auth.get("access_key_hash") or ""))
 
 
 def expire_stale_sessions(db: Session) -> None:
@@ -403,10 +364,10 @@ def expire_stale_sessions(db: Session) -> None:
             lease.ended_at = current
 
 
-def create_direct_session(db: Session, settings: Settings, *, target: str, username: str, password: str) -> SessionLease:
+def create_direct_session(db: Session, settings: Settings, *, target: str, access_key: str) -> SessionLease:
     target = normalize_access_target(target)
     expire_stale_sessions(db)
-    if not verify_direct_login(db, settings, target=target, username=username, password=password):
+    if not verify_direct_login(db, settings, target=target, access_key=access_key):
         raise HTTPException(status_code=403, detail="invalid_credentials")
     session_key = secrets.token_urlsafe(32)
     lease = SessionLease(
@@ -839,22 +800,22 @@ def _read_cpu_totals() -> tuple[int, int] | None:
     return idle, total
 
 
-def _read_cpu_percent() -> float:
+def _read_cpu_percent() -> float | None:
     first = _read_cpu_totals()
     if first is None:
-        return 0.0
+        return None
     time.sleep(0.05)
     second = _read_cpu_totals()
     if second is None:
-        return 0.0
+        return None
     idle_delta = second[0] - first[0]
     total_delta = second[1] - first[1]
     if total_delta <= 0:
-        return 0.0
+        return None
     return round(max(0.0, min(100.0, 100.0 * (1.0 - idle_delta / total_delta))), 1)
 
 
-def _read_ram() -> tuple[int, int, float]:
+def _read_ram() -> tuple[int | None, int | None, float | None]:
     try:
         data = {}
         for line in open("/proc/meminfo", "r", encoding="utf-8"):
@@ -863,29 +824,41 @@ def _read_ram() -> tuple[int, int, float]:
         total = data.get("MemTotal", 0)
         available = data.get("MemAvailable", 0)
         used = max(0, total - available)
-    except OSError:
-        total = used = 0
-    percent = round((used / total * 100.0) if total else 0.0, 1)
+    except (OSError, ValueError):
+        return None, None, None
+    if not total:
+        return None, None, None
+    percent = round(used / total * 100.0, 1)
     return used, total, percent
 
 
 def build_system_metrics() -> dict:
     ram_used, ram_total, ram_percent = _read_ram()
-    disk = shutil.disk_usage("/")
+    settings = Settings()
+    path = Path(getattr(settings, "perimetr_data_filesystem", "") or settings.perimetr_state_dir).resolve()
     try:
-        with open("/proc/uptime", "r", encoding="utf-8") as uptime_file:
-            uptime_seconds = int(float(uptime_file.read().split()[0]))
-    except (OSError, ValueError, IndexError):
-        uptime_seconds = int(time.monotonic())
+        if hasattr(os, "statvfs"):
+            disk = os.statvfs(path)
+            total = disk.f_blocks * disk.f_frsize
+            used = total - disk.f_bavail * disk.f_frsize
+        else:
+            disk = shutil.disk_usage(path)
+            total, used = disk.total, disk.total - disk.free
+        if total <= 0:
+            raise ValueError("unavailable disk capacity")
+        percent = round(max(0.0, min(100.0, used / total * 100.0)), 1)
+    except (OSError, ValueError):
+        total = used = percent = None
     return {
         "cpu_percent": _read_cpu_percent(),
+        "cpu_cores": os.cpu_count(),
         "ram_used_bytes": ram_used,
         "ram_total_bytes": ram_total,
         "ram_percent": ram_percent,
-        "disk_used_bytes": disk.used,
-        "disk_total_bytes": disk.total,
-        "disk_percent": round(disk.used / disk.total * 100.0, 1) if disk.total else 0.0,
-        "uptime_seconds": max(0, uptime_seconds),
+        "disk_used_bytes": used,
+        "disk_total_bytes": total,
+        "disk_percent": percent,
+        "uptime_seconds": max(0, int(time.monotonic() - PROCESS_STARTED)),
     }
 
 

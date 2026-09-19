@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "service": "perimetr",
+  "catalog_revision": "8737b50f0aca4b84f4fa223272bdfb63ade05d33",
+  "catalog_sha256": "a66eb1e6942874e506975a7708cec6a0bf6f1fe8969a04c341bcd271d2f1cacd",
+  "remote_path": "PART_12_KNOWN_DEPLOYMENT_AND_OPERATIONS_PROBLEMS.md",
+  "active_ids": 97,
+  "case_defaults": {
+    "REL": [
+      "deployment"
+    ],
+    "BST": [
+      "bootstrap",
+      "deployment"
+    ],
+    "TRUST": [
+      "bootstrap",
+      "security"
+    ],
+    "PERM": [
+      "deployment"
+    ],
+    "CTR": [
+      "deployment"
+    ],
+    "NET": [
+      "security",
+      "deployment"
+    ],
+    "HLT": [
+      "unit",
+      "deployment"
+    ],
+    "INT": [
+      "unit",
+      "helper-contract"
+    ],
+    "DATA": [
+      "recovery"
+    ],
+    "OPS": [
+      "deployment"
+    ]
+  },
+  "case_overrides": {
+    "BST-13": [
+      "unit",
+      "bootstrap",
+      "recovery"
+    ],
+    "TRUST-07": [
+      "unit",
+      "security"
+    ],
+    "CTR-08": [
+      "helper-contract",
+      "deployment"
+    ],
+    "CTR-09": [
+      "bootstrap",
+      "helper-contract"
+    ],
+    "OPS-07": [
+      "unit"
+    ]
+  },
+  "final_checks": [
+    "REL-03",
+    "REL-06",
+    "REL-09",
+    "TRUST-06"
+  ],
+  "not_applicable": {
+    "TRUST-02": {
+      "reason": "Perimetr owns no SSH/SFTP client or host key store. Its remote transports are HTTPS and signed Agent callbacks.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "PERM-04": {
+      "reason": "Perimetr consumes the Updater socket and creates only service-owned state. Shared socket directory ownership belongs to the host helper.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "HLT-07": {
+      "reason": "Perimetr does not implement remote storage. Backup downloads are local operator copies with a separately escrowed recovery secret.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "INT-04": {
+      "reason": "Perimetr does not enroll scheduled backup pipelines. Agent assignment uniqueness is covered separately by domain regression tests.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "INT-09": {
+      "reason": "Perimetr exposes a browser operator interface and typed Agent capabilities; it does not provide a chat command gateway or bot menu.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "INT-10": {
+      "reason": "Perimetr does not register external provider webhooks. Machine callbacks use its own signed Agent and Pod protocols.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "INT-11": {
+      "reason": "No external provider webhook worker, repository filter or import queue belongs to this service. Signed domain callbacks have separate tests.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "DATA-03": {
+      "reason": "Perimetr has bounded request-local ZIP uploads, with no resumable remote storage upload sessions or quota reservations.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "DATA-05": {
+      "reason": "This service owns no external storage credentials or namespace. Recovery is verified by an isolated database restore drill.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "DATA-07": {
+      "reason": "No shared remote storage root exists in the Perimetr profile. Its persistent database and state are private Compose volumes.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "DATA-08": {
+      "reason": "Perimetr has no automatic remote backup producer. No export credentials or automatic backup agent are provisioned.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "DATA-09": {
+      "reason": "No automatic backup scheduler is approved for Perimetr in the current central service profile; Neptune is not installed or exposed.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    },
+    "DATA-10": {
+      "reason": "Independent operator backup storage and failure domains are deployment choices outside this local application; no redundancy is claimed.",
+      "paths": [
+        "docs/unification.md",
+        "compose.production.yaml"
+      ]
+    }
+  }
+}

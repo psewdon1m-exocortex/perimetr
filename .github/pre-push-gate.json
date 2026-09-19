@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "service": "perimetr",
+  "exposure_modes": [
+    "public/non-indexable",
+    "private"
+  ],
+  "profiles": {
+    "backup_restore": {
+      "applicable": true,
+      "evidence": [
+        "README.md",
+        "app/backup_service/snapshot.py",
+        "tests/test_api.py"
+      ]
+    },
+    "service_update": {
+      "applicable": true,
+      "evidence": [
+        "README.md",
+        "app/operations_api.py",
+        "tests/test_recovery_contract.py"
+      ]
+    },
+    "internal_documentation": {
+      "applicable": true,
+      "evidence": [
+        "app/static/index.html",
+        "tests/test_api.py"
+      ]
+    },
+    "technical_documentation": {
+      "applicable": true,
+      "evidence": [
+        "README.md",
+        "RELEASING.md"
+      ]
+    },
+    "security": {
+      "applicable": true,
+      "evidence": [
+        "tests/test_security.py",
+        "tests/test_api.py"
+      ]
+    },
+    "public_seo_geo": {
+      "applicable": false,
+      "reason": "Perimetr has no intentionally public/indexable content surface."
+    },
+    "private_concealed": {
+      "applicable": true,
+      "evidence": [
+        "README.md",
+        "tests/test_security.py"
+      ]
+    }
+  }
+}

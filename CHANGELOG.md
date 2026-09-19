@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+This document specializes [Part 00 â€” system unification specification](https://github.com/psewdon1m-exocortex/general/blob/8737b50f0aca4b84f4fa223272bdfb63ade05d33/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md); that central contract remains authoritative.
+
+## 2.0.0 — Unreleased
+
+- Migrate operator login to one exact Access Key with database-owned salted verifier, session revocation, CSRF and current-key rotation; preserve separate Pod credentials.
+- Introduce authenticated full ZIP v3 recovery, encrypted logical rows, complete table coverage, bounded preflight and atomic replacement. Remove legacy plaintext backup export.
+- Adopt Updater protocol 2 with saved-copy receipts, request lookup, scoped polling and original-file rollback; separate service and helper versions.
+- Persist presentation on the server, unify Settings/Documentation geometry and modal accessibility, and report actual process/data-filesystem metrics.
+- Bound and redact audit storage, cursor pages and diagnostic exports. Keep Kernel credentials outside backup and require explicit host-helper synchronization.
+- Verify exact-version bootstrap trust and safe extraction; pin CI actions and dependencies, build once and gate signing/promotion on revision-bound Part 12 qualification.
+- Disable unsupported Neptune installation prerequisites and remove unused Redis. No existing volumes are deleted.
+- Publication remains blocked on verified dependency pins and external qualification; see RELEASING.md.
 
 ## 1.2.3 - 2026-08-15
 

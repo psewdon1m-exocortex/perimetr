@@ -1,0 +1,14 @@
+import { createPublicKey } from "node:crypto";
+import fs from "node:fs";
+
+const [templatePath, publicKeyPath, outputPath, version] = process.argv.slice(2);
+if (!templatePath || !publicKeyPath || !outputPath || (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "") || version === "0.0.0")) throw new Error("Usage: build-bootstrap.mjs <template> <public-key.pem> <output> <version>");
+const publicPem = fs.readFileSync(publicKeyPath, "utf8");
+const key = createPublicKey(publicPem);
+if (key.asymmetricKeyType !== "rsa" || (key.asymmetricKeyDetails?.modulusLength ?? 0) < 3072) throw new Error("Perimetr bootstrap requires RSA-3072 public trust");
+if (/PRIVATE KEY/.test(publicPem)) throw new Error("Refusing to embed private key material");
+const template = fs.readFileSync(templatePath, "utf8");
+for (const value of ["__PERIMETR_BOOTSTRAP_RELEASE_VERSION__", "__PERIMETR_BOOTSTRAP_PUBLIC_KEY_BASE64__"]) if (template.split(value).length !== 2) throw new Error(`Expected exactly one ${value}`);
+const output = template.replace("__PERIMETR_BOOTSTRAP_RELEASE_VERSION__", version).replace("__PERIMETR_BOOTSTRAP_PUBLIC_KEY_BASE64__", Buffer.from(publicPem).toString("base64"));
+if (output.includes("__PERIMETR_BOOTSTRAP_") || /PRIVATE KEY/.test(output)) throw new Error("Unsafe generated bootstrap");
+fs.writeFileSync(outputPath, output, { mode: 0o755 });

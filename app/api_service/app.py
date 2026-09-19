@@ -15,7 +15,7 @@ import hashlib
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
@@ -35,7 +35,8 @@ from ..agent_request_security import (
     verify_agent_request,
 )
 from ..controller_identity import ensure_controller_signing_material
-from ..backup_service.service import build_backup_payload, build_backup_zip, import_backup_bundle
+from ..operations_api import register as register_operations
+from ..logs_api import register as register_logs
 from ..database import SessionLocal, get_db
 from ..database_migrations import upgrade_database
 from ..enums import LaunchDecision, SessionStatus
@@ -68,6 +69,7 @@ from ..models import (
     new_entity_id,
 )
 from ..schemas import (
+    AccessKeyChange,
     AgentAssignmentCreate,
     AgentAssignmentRead,
     AgentControlHeartbeatRequest,
@@ -93,6 +95,7 @@ from ..schemas import (
     PodProvisioningCreate,
     PodProvisioningRead,
     PodPasswordUpdate,
+    PodLoginRequest,
     PodRenameRequest,
     PodSignedHeartbeatRequest,
     PodRead,
@@ -185,7 +188,7 @@ from ..services import (
     summarize_agent,
     unassign_agent_from_block,
     upsert_agent_capabilities,
-    update_direct_password,
+    update_access_key,
     update_overview_block,
     verify_direct_login,
     update_agent_command_status,
@@ -193,8 +196,11 @@ from ..services import (
     visible_agent_status,
     correlation_percentage,
 )
-from ..settings import get_settings
-from ..security import LoginRateLimiter, validate_runtime_settings
+from ..settings import Settings, get_settings
+from ..security import LoginRateLimiter, validate_runtime_settings, csrf_token
+from ..request_policy import client_identity, validate_browser_origin, validate_csrf
+from ..operator_settings import ensure_preferences, public_preferences, update_preferences
+from ..redaction import redact
 from ..updater import check_github_release
 from .. import updater_client
 
@@ -275,12 +281,17 @@ def _overview_block_payload(block_id: str, block: dict[str, str]) -> OverviewBlo
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    settings = get_settings()
+    settings = Settings()
     validate_runtime_settings(settings)
     await asyncio.to_thread(upgrade_database, settings.perimetr_database_url)
+    from ..redaction import protect_operational_logs
+    protect_operational_logs()
     with SessionLocal() as db:
         ensure_perimetr_system_settings(db, settings)
+        from ..kernel_connection import apply_connection
+        apply_connection(settings, db)
         db.commit()
+    settings = await asyncio.to_thread(get_settings)
     async def refresh_kernel_settings() -> None:
         while True:
             current = get_settings()
@@ -339,265 +350,22 @@ async def lifespan(_: FastAPI):
                 pass
 
 
-def build_direct_login_html(*, error: str | None = None) -> str:
-    friendly_errors = {
-        "invalid_credentials": "Login or password is incorrect.",
-        "login_failed": "Unable to sign in.",
-    }
-    error_message = friendly_errors.get(error or "", (error or "").replace("_", " ").capitalize())
-    error_html = f'<div id="loginError" class="error">{html.escape(error_message)}</div>' if error else '<div id="loginError" class="error" hidden></div>'
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />
-  <title>perimetr</title>
-  <style>
-    :root {{
-      --dark: #000000;
-      --light: #ffffff;
-      --accent: #00a8ff;
-      --line: color-mix(in srgb, var(--light) 50%, transparent);
-      --line-mid: color-mix(in srgb, var(--light) 75%, transparent);
-      --line-outer: var(--light);
-      --danger: #ff4d4d;
-      --ok: #2dff9a;
-    }}
-    * {{ box-sizing: border-box; }}
-    html {{
-      background: var(--dark);
-    }}
-    body {{
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      background: var(--dark);
-      color: var(--light);
-      font-family: Consolas, "Cascadia Mono", "Segoe UI Mono", monospace;
-    }}
-    main {{
-      width: min(560px, 100%);
-      border: 1px solid var(--line-outer);
-      background: var(--dark);
-    }}
-    .login-header {{
-      min-height: 194px;
-      display: grid;
-      align-content: center;
-      justify-items: start;
-      padding: 24px 18px;
-    }}
-    h1 {{
-      width: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin: 0;
-      color: var(--accent);
-      font-size: clamp(48px, 14vw, 80px);
-      font-weight: 900;
-      line-height: .82;
-    }}
-    form {{ display: grid; gap: 14px; padding: 24px 18px; }}
-    .field {{ display: block; margin: 0; }}
-    .visually-hidden {{
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip: rect(0 0 0 0);
-      white-space: nowrap;
-      clip-path: inset(50%);
-    }}
-    input {{
-      width: 100%;
-      min-height: 36px;
-      border: 1px solid var(--line);
-      background: var(--dark);
-      color: var(--light);
-      padding: 8px 10px;
-      font: inherit;
-      transition: background-color .16s ease, border-color .16s ease, color .16s ease;
-    }}
-    input::placeholder {{ color: color-mix(in srgb, var(--light) 55%, var(--dark)); opacity: 1; }}
-    input:hover {{ border-color: var(--light); }}
-    input:focus {{ border-color: var(--accent); color: var(--light); outline: none; }}
-    button {{
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 50%;
-      min-height: 36px;
-      border: 1px solid var(--accent);
-      background: var(--dark);
-      color: var(--accent);
-      padding: 8px 12px;
-      cursor: pointer;
-      font: inherit;
-      transform-origin: center;
-      transition: background-color .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
-    }}
-    button:hover:not(:disabled) {{
-      background: color-mix(in srgb, var(--dark) 90%, var(--light) 10%);
-      border-color: var(--accent);
-      color: var(--accent);
-      transform: scale(1.02);
-    }}
-    button:active:not(:disabled) {{ transform: scale(.985); transition-duration: 60ms; }}
-    button:focus-visible, input:focus-visible {{ outline: 1px solid var(--accent); outline-offset: 2px; }}
-    button:disabled {{ opacity: .45; cursor: wait; transform: none; }}
-    .actions {{ display: flex; align-items: center; margin-top: 2px; }}
-    .error {{ color: var(--danger); min-height: 16px; font-size: 11px; line-height: 1.4; }}
-    .error[hidden] {{ display: none; }}
-    .access-status {{
-      display: inline-flex;
-      align-items: center;
-      gap: 9px;
-      margin-top: 30px;
-      color: var(--ok);
-      font-size: 10px;
-      font-weight: 700;
-    }}
-    .access-status.unavailable {{ color: var(--danger); }}
-    .status-spinner {{ width: 12px; height: 12px; border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); border-top-color: var(--ok); border-radius: 50%; animation: spin .8s linear infinite; }}
-    .access-status.unavailable .status-spinner {{ display: none; }}
-    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-  </style>
-</head>
-<body>
-  <main>
-    <header class="login-header">
-      <h1 aria-label="PERIMETR"><span aria-hidden="true">P</span><span aria-hidden="true">E</span><span aria-hidden="true">R</span><span aria-hidden="true">I</span><span aria-hidden="true">M</span><span aria-hidden="true">E</span><span aria-hidden="true">T</span><span aria-hidden="true">R</span></h1>
-      <div id="accessIndicator" class="access-status" role="status" aria-live="polite"><span id="accessStatus">AVAILABLE</span></div>
-    </header>
-    <form id="loginForm">
-      <input name="target" type="hidden" value="perimetr" />
-      <label class="field"><span class="visually-hidden">Login</span><input name="username" autocomplete="username" placeholder="Login" aria-label="Login" autofocus /></label>
-      <label class="field"><span class="visually-hidden">Password</span><input name="password" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" /></label>
-      {error_html}
-      <div class="actions">
-        <button id="signInButton" type="submit" disabled>Sign in</button>
-      </div>
-    </form>
-  </main>
-  <script>
-    function applyStoredTheme() {{
-      let theme = null;
-      try {{
-        theme = JSON.parse(localStorage.getItem("perimetr.theme") || "null");
-      }} catch (_) {{
-        theme = null;
-      }}
-      if (!theme) {{
-        const match = document.cookie.match(/(?:^|; )perimetr_theme=([^;]+)/);
-        if (match) {{
-          try {{
-            theme = JSON.parse(decodeURIComponent(match[1]));
-          }} catch (_) {{
-            theme = null;
-          }}
-        }}
-      }}
-      if (!theme) return;
-      if (theme.dark) document.documentElement.style.setProperty("--dark", theme.dark);
-      if (theme.light) document.documentElement.style.setProperty("--light", theme.light);
-      if (theme.accent) document.documentElement.style.setProperty("--accent", theme.accent);
-    }}
-    applyStoredTheme();
-    const loginForm = document.getElementById("loginForm");
-    const signInButton = document.getElementById("signInButton");
-    const usernameInput = loginForm.elements.username;
-    const passwordInput = loginForm.elements.password;
-    let pending = false;
-    function syncSubmitState() {{
-      signInButton.disabled = pending || !String(usernameInput.value || "").trim() || !String(passwordInput.value || "");
-    }}
-    loginForm.addEventListener("input", syncSubmitState);
-    loginForm.addEventListener("keydown", event => {{
-      if (event.key === "Enter" && !event.isComposing && !signInButton.disabled) {{
-        event.preventDefault();
-        loginForm.requestSubmit(signInButton);
-      }}
-    }});
-    loginForm.addEventListener("submit", async (event) => {{
-      event.preventDefault();
-      const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-      const notice = document.getElementById("loginError");
-      const showError = message => {{
-        const labels = {{ invalid_credentials: "Login or password is incorrect.", login_failed: "Unable to sign in." }};
-        notice.textContent = labels[message] || String(message || "Unable to sign in.").replaceAll("_", " ");
-        notice.hidden = false;
-      }};
-      if (!String(payload.username || "").trim() || !String(payload.password || "")) {{
-        showError("Enter login and password.");
-        return;
-      }}
-      pending = true;
-      signInButton.textContent = "Signing in...";
-      syncSubmitState();
-      try {{
-        const response = await fetch("/v1/auth/direct", {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify(payload),
-        }});
-        const text = await response.text();
-        let body = null;
-        try {{ body = text ? JSON.parse(text) : null; }} catch (_) {{ body = null; }}
-        if (!response.ok) {{
-          showError(body?.error?.message || body?.detail || "login_failed");
-          return;
-        }}
-        notice.hidden = true;
-        window.location = "/";
-      }} catch (_) {{
-        showError("Perimetr is unavailable.");
-      }} finally {{
-        pending = false;
-        signInButton.textContent = "Sign in";
-        syncSubmitState();
-      }}
-    }});
-    syncSubmitState();
-  </script>
-</body>
-</html>"""
-
-
-def _backup_dir() -> Path:
-    path = Path(".tmp") / "backups"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _backup_meta_path(backup_id: str) -> Path:
-    return _backup_dir() / f"{backup_id}.json"
-
-
-def _backup_zip_path(backup_id: str) -> Path:
-    return _backup_dir() / f"{backup_id}.zip"
-
-
-async def _validate_backup_upload(archive: UploadFile) -> None:
-    maximum = max(get_settings().perimetr_max_backup_upload_bytes, 1024 * 1024)
-    content = await archive.read(maximum + 1)
-    if len(content) > maximum:
-        raise HTTPException(status_code=413, detail="backup_archive_too_large")
-    await archive.seek(0)
+def build_direct_login_html(*, error: str | None = None, accent: str = "#00A8FF") -> str:
+    from ..login_ui import render
+    return render(error, accent)
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="perimetr",
-        version=get_settings().perimetr_version,
+        version=Settings().perimetr_version,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
         lifespan=lifespan,
     )
+    from ..request_policy import RequestBoundary
+    app.add_middleware(RequestBoundary)
     app.state.login_rate_limiter = LoginRateLimiter()
     app.state.agent_request_replay_cache = AgentRequestReplayCache()
 
@@ -608,7 +376,17 @@ def create_app() -> FastAPI:
         else:
             response = await call_next(request)
         response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         return response
+
+    from fastapi.exceptions import RequestValidationError
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_, exc):
+        return JSONResponse({"error": {"message": "Invalid request fields", "fields": [str(e["loc"][-1]) for e in exc.errors()]}}, status_code=422)
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_, exc: HTTPException) -> JSONResponse:
@@ -636,14 +414,16 @@ def create_app() -> FastAPI:
         if perimetr_session_id and perimetr_session_key:
             try:
                 lease = get_session_lease(db, perimetr_session_id)
-                if lease.status == SessionStatus.active.value and secrets.compare_digest(
+                if lease.status == SessionStatus.active.value and lease.transport == "direct" and lease.access_scope == "perimetr" and secrets.compare_digest(
                     lease.session_key_hash,
                     hash_session_key(perimetr_session_key),
                 ):
                     return core_ui.build_core_index_html()
             except HTTPException:
                 pass
-        return build_direct_login_html(error=error)
+        accent = public_preferences(ensure_preferences(db, get_settings()))["theme"]["accent"]
+        db.commit()
+        return build_direct_login_html(error=error, accent=accent)
 
     @app.post("/v1/auth/direct", response_model=DirectLoginRead)
     async def direct_login(
@@ -654,11 +434,8 @@ def create_app() -> FastAPI:
     ) -> DirectLoginRead:
         settings = get_settings()
         target = normalize_access_target(payload.target)
-        source_ip = (
-            request.headers.get("x-real-ip")
-            or (request.client.host if request.client else "")
-            or "unknown"
-        )
+        validate_browser_origin(request, settings.perimetr_public_url)
+        source_ip = client_identity(request, settings.perimetr_trusted_proxies)
         limiter: LoginRateLimiter = app.state.login_rate_limiter
         decision = limiter.check(source_ip)
         if not decision.allowed:
@@ -670,7 +447,7 @@ def create_app() -> FastAPI:
                 target_type="system",
                 target_id=PERIMETR_SYSTEM_ENTITY_ID,
                 payload={"target": target},
-                result={"reason": "rate_limit"},
+                result={"outcome": "denied", "reason": "rate_limit"},
             )
             db.commit()
             raise HTTPException(
@@ -685,8 +462,7 @@ def create_app() -> FastAPI:
                 db,
                 settings,
                 target=target,
-                username=payload.username,
-                password=payload.password,
+                access_key=payload.access_key,
             )
         except HTTPException:
             limiter.fail(source_ip)
@@ -698,7 +474,7 @@ def create_app() -> FastAPI:
                 target_type="system",
                 target_id=PERIMETR_SYSTEM_ENTITY_ID,
                 payload={"target": target},
-                result={"reason": "invalid_credentials"},
+                result={"outcome": "denied", "reason": "invalid_credentials"},
             )
             db.commit()
             raise HTTPException(status_code=401, detail="invalid_credentials") from None
@@ -707,7 +483,7 @@ def create_app() -> FastAPI:
         audit(
             db,
             actor_type="direct_browser",
-            actor_id=payload.username,
+            actor_id="operator",
             action="direct.session.created",
             target_type="system",
             target_id=PERIMETR_SYSTEM_ENTITY_ID,
@@ -720,7 +496,7 @@ def create_app() -> FastAPI:
             lease.id,
             httponly=True,
             secure=settings.perimetr_cookie_secure,
-            samesite="lax",
+            samesite="strict",
             max_age=settings.perimetr_session_ttl_sec,
         )
         response.set_cookie(
@@ -728,7 +504,7 @@ def create_app() -> FastAPI:
             session_key,
             httponly=True,
             secure=settings.perimetr_cookie_secure,
-            samesite="lax",
+            samesite="strict",
             max_age=settings.perimetr_session_ttl_sec,
         )
         return DirectLoginRead(
@@ -736,16 +512,11 @@ def create_app() -> FastAPI:
             target=target,
             transport="direct",
             renderer_url=settings.perimetr_public_url,
+            csrf_token=csrf_token(lease.session_key_hash),
         )
 
-    @app.post("/v1/auth/logout")
-    def direct_logout() -> RedirectResponse:
-        response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(PERIMETR_SESSION_ID_COOKIE)
-        response.delete_cookie(PERIMETR_SESSION_KEY_COOKIE)
-        return response
-
     def require_core_access(
+        request: Request,
         perimetr_session_id: str | None = Cookie(None, alias=PERIMETR_SESSION_ID_COOKIE),
         perimetr_session_key: str | None = Cookie(None, alias=PERIMETR_SESSION_KEY_COOKIE),
         db: Session = Depends(get_db),
@@ -761,7 +532,44 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="perimetr_session_inactive")
         if not secrets.compare_digest(lease.session_key_hash, hash_session_key(session_key)):
             raise HTTPException(status_code=403, detail="perimetr_session_invalid")
+        if lease.access_scope != "perimetr" or lease.transport != "direct":
+            raise HTTPException(403, "perimetr_access_required")
+        validate_csrf(request, lease.session_key_hash, get_settings().perimetr_public_url)
         return lease
+
+    register_operations(app, require_core_access)
+    register_logs(app, require_core_access)
+    from ..kernel_connection import register as register_kernel_connection
+    register_kernel_connection(app, require_core_access)
+
+    @app.get("/v1/auth/session")
+    def current_session(lease: SessionLease = Depends(require_core_access)) -> dict:
+        return {"csrf_token": csrf_token(lease.session_key_hash), "expires_at": lease.expires_at}
+
+    @app.post("/v1/auth/logout")
+    def direct_logout(lease: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> Response:
+        lease.status = "revoked"
+        lease.ended_at = now_utc()
+        db.commit()
+        response = JSONResponse({"signed_out": True})
+        response.delete_cookie(PERIMETR_SESSION_ID_COOKIE)
+        response.delete_cookie(PERIMETR_SESSION_KEY_COOKIE)
+        return response
+
+    @app.get("/v1/settings/preferences")
+    def read_preferences(_: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
+        record = ensure_preferences(db, get_settings())
+        value = public_preferences(record)
+        db.commit()
+        return value
+
+    @app.patch("/v1/settings/preferences")
+    def save_preferences(payload: dict, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
+        value = update_preferences(db, get_settings(), payload)
+        audit(db, actor_type="operator", actor_id="operator", action="settings.presentation.updated",
+              target_type="system", target_id=PERIMETR_SYSTEM_ENTITY_ID, result={"revision": value["revision"]})
+        db.commit()
+        return value
 
     async def require_agent_callback_authentication(
         request: Request,
@@ -798,13 +606,21 @@ def create_app() -> FastAPI:
     def health(request: Request) -> HealthResponse:
         if any(request.headers.get(name) for name in PROXY_IDENTITY_HEADERS):
             raise HTTPException(status_code=404, detail="not_found")
-        return HealthResponse(status="ok", service="perimetr")
+        return HealthResponse(status="ok", service="perimetr", version=get_settings().perimetr_version)
 
-    @app.get("/v1/public/status", response_model=StatusResponse, include_in_schema=False)
-    def public_status(request: Request, db: Session = Depends(get_db)) -> StatusResponse:
-        if any(request.headers.get(name) for name in PROXY_IDENTITY_HEADERS):
-            raise HTTPException(status_code=404, detail="not_found")
-        return StatusResponse(**build_status_response(db))
+    @app.get("/v1/reachability", include_in_schema=False)
+    def reachability() -> dict:
+        return {"reachable": True}
+
+    @app.get("/assets/{name}", include_in_schema=False)
+    def public_asset(name: str, request: Request, db: Session = Depends(get_db)) -> Response:
+        allowed = {"unified.css", "space-grotesk.woff2", "exact-key.js", "core.css", "core.js", "operator.js"}
+        if name not in allowed:
+            raise HTTPException(404, "not_found")
+        if name in {"core.css", "core.js", "operator.js"}:
+            require_core_access(request, request.cookies.get(PERIMETR_SESSION_ID_COOKIE), request.cookies.get(PERIMETR_SESSION_KEY_COOKIE), db)
+        return FileResponse(Path(__file__).resolve().parents[1] / "static" / name,
+                            media_type="text/css" if name.endswith(".css") else "application/javascript" if name.endswith(".js") else "font/woff2")
 
     @app.get("/v1/status", response_model=StatusResponse)
     def status(_: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> StatusResponse:
@@ -908,342 +724,39 @@ def create_app() -> FastAPI:
             },
         }
 
-    @app.post("/v1/updater/check")
-    def check_for_updates(
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        try:
-            # An explicit operator check also refreshes the last-known-good
-            # Register snapshot before resolving the repository URL.
-            get_settings.cache_clear()
-            settings = get_settings()
-            result = check_github_release(
-                repository_url=settings.perimetr_repository_url,
-                service="perimetr",
-                current_version=settings.perimetr_version,
-                timeout_seconds=settings.perimetr_update_check_timeout_sec,
-            )
-            audit(
-                db,
-                actor_type="perimetr",
-                actor_id="core",
-                action="updater.check",
-                target_type="system",
-                target_id=PERIMETR_SYSTEM_ENTITY_ID,
-                result={
-                    "installed_version": result["installed_version"],
-                    "available_version": result["available_version"],
-                    "update_available": result["update_available"],
-                    "repository_url": result["repository_url"],
-                },
-            )
-            db.commit()
-            return result
-        except Exception as exc:
-            audit(
-                db,
-                actor_type="perimetr",
-                actor_id="core",
-                action="updater.check",
-                target_type="system",
-                target_id=PERIMETR_SYSTEM_ENTITY_ID,
-                result={"error": str(exc)},
-            )
-            db.commit()
-            raise HTTPException(status_code=502, detail=f"UPDATE_CHECK_FAILED: {exc}") from exc
-
-    @app.get("/v1/updater/status")
-    def updater_status(_: SessionLease = Depends(require_core_access)) -> dict:
-        return updater_client.status(get_settings().updater_socket_path)
-
-    @app.post("/v1/updater/install")
-    def install_update(
-        payload: dict,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        version = str(payload.get("version") or "").strip()
-        backup_id = str(payload.get("backup_id") or "").strip()
-        if not version:
-            raise HTTPException(status_code=400, detail="Select a published Perimetr release")
-        if not re.fullmatch(r"\d{14}-[0-9a-f]{8}", backup_id):
-            raise HTTPException(status_code=400, detail="Download a fresh Perimetr backup before installing")
-        meta_path = _backup_meta_path(backup_id)
-        zip_path = _backup_zip_path(backup_id)
-        if not meta_path.exists() or not zip_path.exists():
-            raise HTTPException(status_code=409, detail="The staged Perimetr backup is unavailable")
-        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-        if metadata.get("entity_type") != "system":
-            raise HTTPException(status_code=400, detail="A complete system backup is required")
-        try:
-            backup_created_at = datetime.fromisoformat(str(metadata["created_at"]))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="Backup metadata is invalid") from exc
-        if datetime.now(timezone.utc) - backup_created_at > timedelta(minutes=15):
-            raise HTTPException(status_code=409, detail="The staged Perimetr backup is older than 15 minutes")
-        backup_bytes = zip_path.read_bytes()
-        filename = str(metadata.get("filename") or f"perimetr-pre-update-{backup_id}.zip")
-        checksum = hashlib.sha256(backup_bytes).hexdigest()
-        try:
-            job = updater_client.request(
-                get_settings().updater_socket_path,
-                "POST",
-                "/v1/updates",
-                {
-                    "request_id": f"perimetr-{secrets.token_hex(16)}",
-                    "head_id": get_settings().updater_head_id,
-                    "service": "perimetr",
-                    "version": version,
-                    "backup": {
-                        "filename": filename,
-                        "sha256": checksum,
-                        "data_base64": base64.b64encode(backup_bytes).decode("ascii"),
-                    },
-                },
-                timeout=30,
-                control_token=get_settings().updater_control_token,
-            )
-        except updater_client.UpdaterUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        audit(
-            db,
-            actor_type="perimetr",
-            actor_id="core",
-            action="updater.install.requested",
-            target_type="system",
-            target_id=PERIMETR_SYSTEM_ENTITY_ID,
-            result={"job_id": job.get("id"), "version": version, "backup_id": backup_id},
-        )
-        db.commit()
-        return JSONResponse(job, status_code=202)
-
-    @app.get("/v1/updater/jobs/{job_id}")
-    def updater_job(job_id: str, _: SessionLease = Depends(require_core_access)) -> dict:
-        try:
-            return updater_client.request(
-                get_settings().updater_socket_path,
-                "GET",
-                f"/v1/jobs/{job_id}",
-            )
-        except updater_client.UpdaterUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    @app.post("/v1/updater/jobs/{job_id}/rollback")
-    def rollback_updater_job(job_id: str, _: SessionLease = Depends(require_core_access)) -> dict:
-        try:
-            return JSONResponse(
-                updater_client.request(
-                    get_settings().updater_socket_path,
-                    "POST",
-                    f"/v1/jobs/{job_id}/rollback",
-                    control_token=get_settings().updater_control_token,
-                ),
-                status_code=202,
-            )
-        except updater_client.UpdaterUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-
     @app.get("/v1/topology")
     def topology(_: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
         return build_topology_snapshot(db)
 
-    @app.get("/v1/logs/{entity_type}/{entity_id}")
-    def read_entity_logs(
-        entity_type: str,
-        entity_id: str,
-        _: SessionLease = Depends(require_core_access),
+    @app.post("/v1/settings/access-key")
+    def change_access_key(
+        payload: AccessKeyChange, response: Response, request: Request,
+        lease: SessionLease = Depends(require_core_access), db: Session = Depends(get_db),
     ) -> dict:
-        log_path = Path(get_settings().perimetr_logs_dir) / f"{entity_type}_{entity_id}.jsonl"
-        if not log_path.exists():
-            return {"entries": [], "path": str(log_path)}
-        entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        return {"entries": entries[-get_settings().perimetr_audit_max_entries :], "path": str(log_path)}
-
-    @app.get("/v1/logs/audit")
-    def read_audit_log(_: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
-        events = db.scalars(
-            select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(get_settings().perimetr_audit_max_entries)
-        ).all()
-        return {
-            "entries": [
-                {
-                    "created_at": event.created_at.isoformat(),
-                    "actor": f"{event.actor_type}:{event.actor_id}",
-                    "action": event.action,
-                    "target": f"{event.target_type}:{event.target_id}",
-                    "payload": event.payload,
-                    "result": event.result,
-                }
-                for event in events
-            ]
-        }
-
-    @app.get("/v1/logs/download")
-    def download_logs(
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> StreamingResponse:
-        logs_dir = Path(get_settings().perimetr_logs_dir)
         settings = get_settings()
-        events = db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.asc())).all()
-        serialized_events = [
-            {
-                "id": event.id,
-                "created_at": event.created_at.isoformat(),
-                "actor": {"type": event.actor_type, "id": event.actor_id},
-                "action": event.action,
-                "target": {"type": event.target_type, "id": event.target_id},
-                "payload": event.payload or {},
-                "result": event.result or {},
-            }
-            for event in events
-        ]
-
-        def detailed_error(event: AuditEvent) -> dict | None:
-            payload = event.payload or {}
-            result = event.result or {}
-            searchable = " ".join(
-                str(value)
-                for value in (
-                    event.action,
-                    result.get("status"),
-                    result.get("error"),
-                    result.get("detail"),
-                    result.get("exception"),
-                    result.get("message"),
-                )
-                if value is not None
-            ).lower()
-            if not re.search(r"\b(error|failed|failure|denied|rejected|exception)\b", searchable):
-                return None
-            message = next(
-                (
-                    str(value)
-                    for value in (
-                        result.get("message"),
-                        result.get("error"),
-                        result.get("detail"),
-                        result.get("exception"),
-                        payload.get("message"),
-                        payload.get("error"),
-                        payload.get("detail"),
-                    )
-                    if value
-                ),
-                f"{event.action} failed for {event.target_type}:{event.target_id}",
-            )
-            return {
-                "event_id": event.id,
-                "occurred_at": event.created_at.isoformat(),
-                "actor": {"type": event.actor_type, "id": event.actor_id},
-                "action": event.action,
-                "target": {"type": event.target_type, "id": event.target_id},
-                "summary": f"{event.action}: {message}",
-                "message": message,
-                "error_type": result.get("error_type") or result.get("type"),
-                "code": result.get("code") or payload.get("code"),
-                "cause": result.get("cause"),
-                "stack_trace": result.get("stack_trace") or result.get("traceback"),
-                "request_id": result.get("request_id") or payload.get("request_id"),
-                "method": result.get("method") or payload.get("method"),
-                "context": {"payload": payload, "result": result},
-            }
-
-        errors = [item for event in events if (item := detailed_error(event)) is not None]
-        generated_at = datetime.now(timezone.utc)
-        manifest = {
-            "schema": "perimetr.logs.export.v1",
-            "service": "perimetr",
-            "version": settings.perimetr_version,
-            "generated_at": generated_at.isoformat(),
-            "event_count": len(serialized_events),
-            "error_count": len(errors),
-            "retention": {
-                "max_entries": settings.perimetr_audit_max_entries,
-                "retention_days": settings.perimetr_audit_retention_days,
-                "max_file_bytes": settings.perimetr_log_max_file_bytes,
-                "max_total_bytes": settings.perimetr_logs_max_total_bytes,
-            },
-            "files": ["manifest.json", "audit-events.json", "errors.json", "README.txt", "raw/*.jsonl"],
-        }
-        buffer = io.BytesIO()
-        with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
-            archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
-            archive.writestr("audit-events.json", json.dumps(serialized_events, indent=2, ensure_ascii=False))
-            archive.writestr("errors.json", json.dumps(errors, indent=2, ensure_ascii=False))
-            archive.writestr(
-                "README.txt",
-                "PERIMETR LOG EXPORT\n\n"
-                "manifest.json describes this archive and the active retention limits.\n"
-                "audit-events.json contains complete structured audit events.\n"
-                "errors.json contains expanded diagnostics for events classified as errors, "
-                "including the original payload and result context. Missing values are null.\n"
-                "raw/ contains the retained JSONL files exactly as stored on disk.\n",
-            )
-            if logs_dir.exists():
-                for path in sorted(logs_dir.glob("*.jsonl")):
-                    archive.write(path, arcname=f"raw/{path.name}")
-        buffer.seek(0)
-        filename = f"perimetr-logs-{generated_at.strftime('%Y%m%d%H%M%S')}.zip"
-        return StreamingResponse(
-            buffer,
-            media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
-    @app.post("/v1/audit/ui")
-    def record_ui_action(
-        payload: dict,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        action = str(payload.get("action") or "ui.action")
-        target_type = str(payload.get("target_type") or "ui")
-        target_id = str(payload.get("target_id") or PERIMETR_SYSTEM_ENTITY_ID)
-        audit(
-            db,
-            actor_type="browser_ui",
-            actor_id="operator",
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            payload=dict(payload.get("payload") or {}),
-            result=dict(payload.get("result") or {}),
-        )
+        limiter = app.state.login_rate_limiter
+        rate_key = "rotation:" + lease.id
+        decision = limiter.check(rate_key)
+        if not decision.allowed:
+            raise HTTPException(429, "Too many attempts", headers={"Retry-After": str(decision.retry_after_seconds)})
+        try:
+            update_access_key(db, settings, current_key=payload.current_key, new_key=payload.new_key,
+                              confirm_key=payload.confirm_key, current_session=lease)
+        except HTTPException:
+            limiter.fail(rate_key)
+            audit(db, actor_type="operator", actor_id="operator", action="auth.access_key.denied",
+                  target_type="system", target_id=PERIMETR_SYSTEM_ENTITY_ID, result={"outcome": "denied"})
+            db.commit()
+            raise
+        limiter.success(rate_key)
+        audit(db, actor_type="operator", actor_id="operator", action="auth.access_key.updated",
+              target_type="system", target_id=PERIMETR_SYSTEM_ENTITY_ID, result={"other_sessions_revoked": True})
         db.commit()
-        return {"recorded": True}
-
-    @app.post("/v1/settings/password")
-    def change_password(
-        payload: dict,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        update_direct_password(
-            db,
-            get_settings(),
-            current_password=str(payload.get("current_password") or ""),
-            new_password=str(payload.get("new_password") or ""),
-            confirm_password=str(payload.get("confirm_password") or ""),
-        )
-        audit(
-            db,
-            actor_type="perimetr",
-            actor_id="core",
-            action="auth.password.updated",
-            target_type="system",
-            target_id=PERIMETR_SYSTEM_ENTITY_ID,
-            result={"direct_login": True},
-        )
-        db.commit()
-        return {"changed": True}
+        response.set_cookie(PERIMETR_SESSION_KEY_COOKIE, getattr(lease, "_plain_session_key"), httponly=True,
+                            secure=settings.perimetr_cookie_secure, samesite="strict", max_age=settings.perimetr_session_ttl_sec)
+        response.set_cookie(PERIMETR_SESSION_ID_COOKIE, lease.id, httponly=True,
+                            secure=settings.perimetr_cookie_secure, samesite="strict", max_age=settings.perimetr_session_ttl_sec)
+        return {"changed": True, "csrf_token": csrf_token(lease.session_key_hash)}
 
     @app.get("/v1/correlation")
     def read_correlation_state(
@@ -1273,92 +786,6 @@ def create_app() -> FastAPI:
         )
         db.commit()
         return result
-
-    @app.post("/v1/backups", response_model=BackupRead, status_code=201)
-    def create_backup(
-        payload: dict | None = None,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> BackupRead:
-        payload = payload or {}
-        entity_type = str(payload.get("entity_type") or "system")
-        entity_id = str(payload.get("entity_id") or PERIMETR_SYSTEM_ENTITY_ID)
-        backup_payload = build_backup_payload(entity_type=entity_type, entity_id=entity_id, db=db)
-        archive = build_backup_zip(backup_payload)
-        created_at = datetime.now(timezone.utc)
-        backup_id = f"{created_at.strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(4)}"
-        filename = f"perimetr-backup-{entity_type}-{backup_id}.zip"
-        _backup_zip_path(backup_id).write_bytes(archive.getvalue())
-        metadata = {
-            "id": backup_id,
-            "filename": filename,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "created_at": created_at.isoformat(),
-        }
-        _backup_meta_path(backup_id).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        audit(
-            db,
-            actor_type="perimetr",
-            actor_id="core",
-            action="backup.created",
-            target_type=entity_type,
-            target_id=entity_id,
-            result={"backup_id": backup_id, "filename": filename},
-        )
-        db.commit()
-        return BackupRead(**metadata)
-
-    @app.get("/v1/backups", response_model=list[BackupRead])
-    def list_backups(_: SessionLease = Depends(require_core_access)) -> list[BackupRead]:
-        items = []
-        for path in sorted(_backup_dir().glob("*.json"), reverse=True):
-            items.append(BackupRead(**json.loads(path.read_text(encoding="utf-8"))))
-        return items
-
-    @app.get("/v1/backups/{backup_id}")
-    def download_backup(backup_id: str, _: SessionLease = Depends(require_core_access)) -> StreamingResponse:
-        meta_path = _backup_meta_path(backup_id)
-        zip_path = _backup_zip_path(backup_id)
-        if not meta_path.exists() or not zip_path.exists():
-            raise HTTPException(status_code=404, detail="backup not found")
-        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-        return StreamingResponse(
-            zip_path.open("rb"),
-            media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{metadata["filename"]}"'},
-        )
-
-    @app.post("/v1/backups/import")
-    async def import_backup(
-        archive: UploadFile = File(...),
-        db: Session = Depends(get_db),
-        _: SessionLease = Depends(require_core_access),
-    ) -> dict:
-        await _validate_backup_upload(archive)
-        try:
-            return await import_backup_bundle(archive=archive, db=db)
-        except (ValueError, KeyError, json.JSONDecodeError) as exc:
-            raise HTTPException(status_code=400, detail=f"INVALID_BACKUP: {exc}") from exc
-
-    @app.post("/v1/internal/updater/restore")
-    async def restore_backup_from_updater(
-        archive: UploadFile = File(...),
-        x_updater_token: str | None = Header(default=None),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        expected = get_settings().updater_control_token
-        if (
-            not expected
-            or not x_updater_token
-            or not secrets.compare_digest(x_updater_token, expected)
-        ):
-            raise HTTPException(status_code=403, detail="Updater authentication required")
-        await _validate_backup_upload(archive)
-        try:
-            return await import_backup_bundle(archive=archive, db=db)
-        except (ValueError, KeyError, json.JSONDecodeError) as exc:
-            raise HTTPException(status_code=400, detail=f"INVALID_BACKUP: {exc}") from exc
 
     @app.get("/v1/objects", response_model=list[ObjectRead])
     def list_objects(_: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> list[PerimetrObject]:
@@ -2055,7 +1482,7 @@ def create_app() -> FastAPI:
             )
             credentials_valid = access_mode is not None
         else:
-            credentials_valid = verify_direct_login(db, settings, target="perimetr", username=payload.username, password=payload.password)
+            credentials_valid = verify_direct_login(db, settings, target="perimetr", access_key=payload.password)
             if credentials_valid:
                 access_mode = "primary"
                 credential_login = payload.username
@@ -2194,7 +1621,7 @@ def create_app() -> FastAPI:
         return {"changed": True, "id": pod.id, "login": pod.login}
 
     @app.post("/v1/pods/{pod_id}/verify")
-    def verify_pod_access(pod_id: str, payload: DirectLoginRequest, db: Session = Depends(get_db)) -> dict:
+    def verify_pod_access(pod_id: str, payload: PodLoginRequest, db: Session = Depends(get_db)) -> dict:
         pod = get_pod(db, pod_id)
         if pod.status == "revoked" or db.scalar(select(PodDenylist).where(PodDenylist.identifier_type == "pod_id", PodDenylist.identifier_value == pod.id)):
             raise HTTPException(status_code=403, detail="pod_revoked")
@@ -2209,7 +1636,7 @@ def create_app() -> FastAPI:
             )
             credentials_valid = access_mode is not None
         else:
-            credentials_valid = verify_direct_login(db, get_settings(), target="perimetr", username=payload.username, password=payload.password)
+            credentials_valid = verify_direct_login(db, get_settings(), target="perimetr", access_key=payload.password)
             if credentials_valid:
                 access_mode = "primary"
                 pod.login = payload.username
@@ -3071,6 +2498,7 @@ def create_app() -> FastAPI:
         action: str | None = None,
         from_ts: datetime | None = Query(None, alias="from"),
         to_ts: datetime | None = Query(None, alias="to"),
+        limit: int = Query(200, ge=1, le=1000),
         _: SessionLease = Depends(require_core_access),
         db: Session = Depends(get_db),
     ) -> list[AuditEvent]:
@@ -3089,6 +2517,6 @@ def create_app() -> FastAPI:
             query = query.where(AuditEvent.created_at >= from_ts)
         if to_ts:
             query = query.where(AuditEvent.created_at <= to_ts)
-        return db.scalars(query).all()
+        return [AuditRead.model_validate(redact(AuditRead.model_validate(event).model_dump(mode="json"))) for event in db.scalars(query.limit(limit))]
 
     return app

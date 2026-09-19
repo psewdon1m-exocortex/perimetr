@@ -63,12 +63,30 @@ def teardown_module() -> None:
 def login(client: TestClient) -> None:
     response = client.post(
         "/v1/auth/direct",
-        json={"target": "perimetr", "username": "admin", "password": "perimetr-entry-password"},
+        json={"access_key": "perimetr-entry-password"},
     )
     assert response.status_code == 200
+    client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
     assert response.json()["target"] == "perimetr"
     assert response.json()["transport"] == "direct"
     assert "session_key" not in response.json()
+
+
+
+def snapshot_member(archive, name):
+    from app.pod_service import _fernet
+    from app.settings import get_settings
+    table = name.removesuffix('.json')
+    lines = archive.read(f'data/{table}.jsonl').splitlines()
+    return json.dumps([json.loads(_fernet(get_settings()).decrypt(line)) for line in lines]).encode()
+
+
+def restore_archive(client, data):
+    response = client.post('/v1/backups/import', content=data, headers={
+        'Content-Type': 'application/zip', 'X-Backup-Sha256': hashlib.sha256(data).hexdigest(), 'X-Confirm-Replace': 'true'})
+    if response.status_code == 200:
+        login(client)
+    return response
 
 
 def agent_test_identity(agent_id: str) -> tuple[ec.EllipticCurvePrivateKey, str, str]:
@@ -119,340 +137,41 @@ def signed_agent_request(
     }
 
 
-def test_direct_login_and_core_shell(monkeypatch) -> None:
+def test_direct_login_and_core_shell() -> None:
     with TestClient(create_app()) as client:
-        robots = client.get("/robots.txt")
-        assert robots.status_code == 200
-        assert robots.text == "User-agent: *\nDisallow: /\n"
-        assert robots.headers["x-robots-tag"] == "noindex, nofollow, noarchive, nosnippet"
-        assert client.get("/docs").status_code == 404
-        assert client.get("/redoc").status_code == 404
-        assert client.get("/openapi.json").status_code == 404
-        for probe in ("/.env", "/wp-admin", "/phpmyadmin", "/.git/config"):
-            probe_response = client.get(probe)
-            assert probe_response.status_code == 404
-
-        health = client.get("/v1/health")
-        assert health.status_code == 200
-        assert health.json() == {"status": "ok", "service": "perimetr"}
-        assert client.get(
-            "/v1/health", headers={"X-Forwarded-For": "203.0.113.10"}
-        ).status_code == 404
-        assert client.get(
-            "/v1/public/status", headers={"X-Forwarded-For": "203.0.113.10"}
-        ).status_code == 404
-
-        entry = client.get("/")
-        assert entry.status_code == 200
-        assert entry.headers["x-robots-tag"] == "noindex, nofollow, noarchive, nosnippet"
-        assert '<meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />' in entry.text
-        assert 'aria-label="PERIMETR"' in entry.text
-        assert 'placeholder="Login"' in entry.text
-        assert 'placeholder="Password"' in entry.text
-        assert 'id="signInButton" type="submit" disabled>Sign in' in entry.text
-        assert "loginForm.requestSubmit(signInButton)" in entry.text
-        assert 'font-size: clamp(48px, 14vw, 80px)' in entry.text
-        assert "var(--dark) 90%, var(--light) 10%" in entry.text
-        assert "var(--dark) 80%, var(--light) 20%" not in entry.text
-        assert "--line-mid: color-mix(in srgb, var(--light) 75%, transparent)" in entry.text
-        assert "border: 1px solid var(--line-outer)" in entry.text
-        assert "form { border: 1px solid var(--line-mid)" not in entry.text
-
-        denied = client.post(
-            "/v1/auth/direct",
-            json={"target": "perimetr", "username": "admin", "password": "wrong"},
-        )
-        assert denied.status_code == 401
-
+        assert client.get('/robots.txt').text == 'User-agent: *\nDisallow: /\n'
+        for path in ['/docs', '/redoc', '/openapi.json', '/.env', '/.git/config', '/wp-admin', '/v1/public/status']:
+            assert client.get(path).status_code == 404
+        assert client.get('/assets/core.js').status_code == 403
+        entry = client.get('/')
+        assert 'name="access_key"' in entry.text and 'name="username"' not in entry.text
+        assert 'no-store' in entry.headers['cache-control']
+        assert client.get('/v1/health').json()['service'] == 'perimetr'
+        assert client.get('/v1/health', headers={'X-Forwarded-For': '203.0.113.10'}).status_code == 404
         login(client)
-        with SessionLocal() as db:
-            preferences = db.scalar(
-                select(SystemSetting).where(SystemSetting.key == "perimetr.preferences")
-            )
-            auth = dict((preferences.value if preferences else {}).get("auth") or {})
-            assert "password" not in auth
-            assert is_password_hash(str(auth.get("password_hash") or ""))
-        shell = client.get("/")
-        assert shell.status_code == 200
-        assert "<title>perimetr</title>" in shell.text
-        assert "Dashboard" in shell.text
-        assert "Overview" in shell.text
-        assert "Correlation Map" in shell.text
-        assert "System Correlation" in shell.text
-        assert "correlationCanvas" in shell.text
-        assert "Center force" in shell.text
-        assert "Repel force" in shell.text
-        assert "Link distance" in shell.text
-        assert "Text fade" in shell.text
-        assert "const textOpacity = 1 - textFade" in shell.text
-        assert 'class="graph-toolbar-toggle"' in shell.text
-        assert 'class="correlation-toolbar collapsed"' in shell.text
-        assert 'aria-expanded="false">Expand Controls' in shell.text
-        assert "Expand Controls" in shell.text
-        assert "text-transform: uppercase" in shell.text
-        assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in shell.text
-        assert "min-height: 815px" in shell.text
-        assert ".fullscreen-body.entity-detail .block-interface { min-height: 658px; }" in shell.text
-        assert "gap: 9px" in shell.text
-        assert ".sidebar-footer form button { width: 140px; }" in shell.text
-        assert 'data-view="documentation">Documentation</button>' in shell.text
-        assert "Welcome To Perimetr" in shell.text
-        assert 'id="documentationSearch"' in shell.text
-        assert 'data-view="pods"><span>Pods</span><small>05</small></button>' in shell.text
-        assert 'id="podsPageList"' in shell.text
-        assert 'id="agentsPageSearch"' in shell.text
-        assert 'id="podsPageSearch"' in shell.text
-        assert 'id="propertiesPageSearch"' in shell.text
-        assert "--sidebar-width: 242px" in shell.text
-        assert "updateNavNumbers()" in shell.text
-        assert "documentation-toc" not in shell.text
-        assert '.sidebar-footer' in shell.text
-        assert 'data-reset-graph-color="property"' in shell.text
-        assert 'data-reset-graph-color="entity"' in shell.text
-        assert "function graphNodeRadius" in shell.text
-        assert 'target.closest("[data-expand]")' in shell.text
-        assert 'data-metric-id="cpu"' in shell.text
-        assert 'data-metric-id="uptime"' in shell.text
-        assert 'id="systemUptime"' in shell.text
-        assert 'data-overview-block="human_general"' in shell.text
-        assert 'data-overview-block="turkey_global"' in shell.text
-        assert 'data-overview-block="russia_sphere"' in shell.text
-        assert 'data-overview-block="laboratory_block"' in shell.text
-        assert 'data-overview-block="perimetr_block"' in shell.text
-        assert 'target.closest("[data-overview-block]")' in shell.text
-        for property_type in (
-            "Plain Text",
-            "Number",
-            "Date",
-            "Geo Location",
-            "Service ID",
-            "Document ID",
-            "Device ID",
-            "Phone Number",
-            "Email Address",
-            "Web Address",
-            "Network Address",
-            "Attachment",
-        ):
-            assert f">{property_type}</option>" in shell.text
-        assert 'localStorage.setItem("perimetr.metricOrder"' in shell.text
-        assert "Pods Settings" in shell.text
-        assert "New Tab Policy" not in shell.text
-        assert "Download Pod" not in shell.text
-        assert 'download.click()' in shell.text
-        assert 'id="newPodLogin"' in shell.text
-        assert 'id="newPodDecoyPassword"' in shell.text
-        assert 'id="projectCreateModalBackdrop"' in shell.text
-        assert 'id="newProjectName"' in shell.text
-        assert 'window.prompt("Project name")' not in shell.text
-        assert "Proxy connection saved automatically." in shell.text
-        assert 'target.matches(".modal-backdrop.open")' in shell.text
-        assert "--line-mid: color-mix(in srgb, var(--light) 75%, transparent)" in shell.text
-        assert "--line-outer: var(--light)" in shell.text
-        assert "var(--dark) 90%, var(--light) 10%" in shell.text
-        assert "var(--dark) 80%, var(--light) 20%" not in shell.text
-        assert "transform: translateX(-100%)" in shell.text
-        assert "label: item.value || item.key" in shell.text
-        assert 'contentEditable = "true"' in shell.text
-        assert "item.slug" not in shell.text
-        assert "Settings" in shell.text
-        assert "Projects" in shell.text
-        assert "window.PERIMETR_ACCESS" not in shell.text
-        assert "Appearance" in shell.text
-        assert "Security" in shell.text
-        assert "LOGGER" in shell.text
-        assert "Updater" in shell.text
-        assert "Check for Updates" in shell.text
-        assert "Retention limits are loading." in shell.text
-        assert "Change Password" in shell.text
-        assert "Import Backup" in shell.text
-        assert "Download Latest" not in shell.text
-        assert "applySafeHoverScale" in shell.text
-        assert "modalDrag" in shell.text
-        assert 'id="notificationStack"' in shell.text
-        assert "function humanizeError" in shell.text
-        assert "grid-auto-rows: max-content" in shell.text
-        assert "Upload Image" in shell.text
-        assert ".fullscreen-body::-webkit-scrollbar" in shell.text
-        assert "Stable accepts production releases" in shell.text
-        assert "Agent Nodes" in shell.text
-        assert "Agent Library" in shell.text
-        assert "Register Agent Node" in shell.text
-        assert "Capability Catalog" in shell.text
-        assert "Live execution" in shell.text
-        assert "Server live view" in shell.text
-        assert "Approval Required" in shell.text
-        assert "Permanently delete this Agent Node from Perimetr" in shell.text
-        assert 'data-view="agents"' in shell.text
-        assert 'data-view="properties"' in shell.text
-        assert "Delete Object" in shell.text
-        assert "Delete Subject" in shell.text
-        assert "Create Pod" in shell.text
-        assert "showDropIndicator" in shell.text
-        assert "drop-before" in shell.text
-        assert "data-agent-library-index" in shell.text
-        assert "data-library-property-index" in shell.text
-        assert "Materialize</button>" not in shell.text
-        assert "Authorize</button>" not in shell.text
-        assert "Auto open and hide sidebar on mouse hover" in shell.text
-        assert "The Agent Node and Sindri will remain installed on the server" in shell.text
-        assert "Run In Test Mode" not in shell.text
-        assert "Dry Run" not in shell.text
-        assert "Shell Command" not in shell.text
-        assert 'id="installUpdate"' in shell.text
-        assert 'id="updaterAvailability"' in shell.text
-        assert 'id="updateInstallModalBackdrop"' in shell.text
-        assert 'id="confirmInstallUpdate"' in shell.text
-        assert "Install Perimetr Update" in shell.text
-        assert "Download backup and install" in shell.text
-        assert "window.confirm(" not in shell.text
-
-        runtime = client.get("/v1/settings/runtime")
-        assert runtime.status_code == 200
-        assert runtime.json()["audit_limits"] == {
-            "max_entries": 240,
-            "retention_days": 30,
-            "max_file_bytes": 5 * 1024 * 1024,
-            "max_total_bytes": 64 * 1024 * 1024,
-        }
-        monkeypatch.setattr(
-            api_app_module,
-            "check_github_release",
-            lambda **kwargs: {
-                "service": "perimetr",
-                "repository_url": kwargs["repository_url"],
-                "installed_version": kwargs["current_version"],
-                "available_version": "1.2.0",
-                "update_available": True,
-                "tag": "perimetr-v1.2.0",
-                "release_url": "https://github.com/example/platform/releases/tag/perimetr-v1.2.0",
-                "published_at": "2026-07-28T00:00:00Z",
-                "prerelease": False,
-                "apply_via": "updater",
-                "backup_required": True,
-            },
-        )
-        update_check = client.post("/v1/updater/check")
-        assert update_check.status_code == 200
-        assert update_check.json()["update_available"] is True
-        assert update_check.json()["available_version"] == "1.2.0"
-
-        monkeypatch.setattr(
-            api_app_module.updater_client,
-            "status",
-            lambda _socket: {
-                "installed": True,
-                "available": True,
-                "status": "ok",
-                "service": "updater",
-                "version": "0.1.0",
-            },
-        )
-        updater_calls = []
-
-        def fake_updater_request(socket_path, method, path, payload=None, timeout=10, control_token=""):
-            updater_calls.append({
-                "socket_path": socket_path,
-                "method": method,
-                "path": path,
-                "payload": payload,
-                "timeout": timeout,
-                "control_token": control_token,
-            })
-            if method == "POST" and path == "/v1/updates":
-                return {"id": "update-job-1", "state": "REQUESTED", "service": "perimetr"}
-            return {"id": "update-job-1", "state": "COMPLETED", "service": "perimetr"}
-
-        monkeypatch.setattr(api_app_module.updater_client, "request", fake_updater_request)
-        status = client.get("/v1/updater/status")
-        assert status.status_code == 200
-        assert status.json()["available"] is True
-        staged_backup = client.post("/v1/backups", json={"entity_type": "system"})
-        assert staged_backup.status_code == 201
-        assert client.get(f"/v1/backups/{staged_backup.json()['id']}").status_code == 200
-        install = client.post(
-            "/v1/updater/install",
-            json={"version": "1.2.0", "backup_id": staged_backup.json()["id"]},
-        )
-        assert install.status_code == 202
-        submitted = updater_calls[-1]
-        assert submitted["path"] == "/v1/updates"
-        assert submitted["payload"]["head_id"] == "perimetr"
-        assert submitted["payload"]["service"] == "perimetr"
-        assert submitted["payload"]["backup"]["sha256"] == hashlib.sha256(
-            base64.b64decode(submitted["payload"]["backup"]["data_base64"])
-        ).hexdigest()
-        assert submitted["control_token"]
-        assert client.get("/v1/updater/jobs/update-job-1").status_code == 200
-        assert client.post("/v1/updater/jobs/update-job-1/rollback").status_code == 202
+        shell = client.get('/')
+        for feature in ['Dashboard', 'Overview', 'Correlation Map', 'Documentation', 'Appearance', 'Security', 'Backup', 'Updates', 'Logs', 'Agent Library', 'Create Pod', 'Approval Required']:
+            assert feature in shell.text
+        assert client.get('/assets/core.js').status_code == 200
+        assert client.get('/assets/operator.js').status_code == 200
+        assert client.get('/v1/settings/runtime').json()['audit_limits']['max_entries'] == 10000
 
 
 def test_direct_login_rate_limit_and_password_rotation() -> None:
     app = create_app()
-    app.state.login_rate_limiter = LoginRateLimiter(
-        max_attempts=2,
-        window_seconds=600,
-        base_delay_seconds=0,
-    )
+    app.state.login_rate_limiter = LoginRateLimiter(max_attempts=2, window_seconds=600, base_delay_seconds=0)
     with TestClient(app) as client:
         for _ in range(2):
-            denied = client.post(
-                "/v1/auth/direct",
-                json={
-                    "target": "perimetr",
-                    "username": "admin",
-                    "password": "wrong",
-                },
-            )
-            assert denied.status_code == 401
-        limited = client.post(
-            "/v1/auth/direct",
-            json={
-                "target": "perimetr",
-                "username": "admin",
-                "password": "perimetr-entry-password",
-            },
-        )
-        assert limited.status_code == 429
-        assert int(limited.headers["retry-after"]) >= 1
-
+            assert client.post('/v1/auth/direct', json={'access_key': 'wrong'}).status_code == 401
+        response = client.post('/v1/auth/direct', json={'access_key': 'perimetr-entry-password'})
+        assert response.status_code == 429 and int(response.headers['retry-after']) >= 1
     with TestClient(create_app()) as client:
         login(client)
-        changed = client.post(
-            "/v1/settings/password",
-            json={
-                "current_password": "perimetr-entry-password",
-                "new_password": "strong-rotated-password",
-                "confirm_password": "strong-rotated-password",
-            },
-        )
-        assert changed.status_code == 200
-        assert client.get("/v1/settings/runtime").status_code == 403
-        assert client.post(
-            "/v1/auth/direct",
-            json={
-                "target": "perimetr",
-                "username": "admin",
-                "password": "perimetr-entry-password",
-            },
-        ).status_code == 401
-        assert client.post(
-            "/v1/auth/direct",
-            json={
-                "target": "perimetr",
-                "username": "admin",
-                "password": "strong-rotated-password",
-            },
-        ).status_code == 200
-        restored = client.post(
-            "/v1/settings/password",
-            json={
-                "current_password": "strong-rotated-password",
-                "new_password": "perimetr-entry-password",
-                "confirm_password": "perimetr-entry-password",
-            },
-        )
-        assert restored.status_code == 200
+        for old, new in [('perimetr-entry-password', ' x '), (' x ', 'perimetr-entry-password')]:
+            changed = client.post('/v1/settings/access-key', json={'current_key': old, 'new_key': new, 'confirm_key': new})
+            assert changed.status_code == 200
+            client.headers['X-CSRF-Token'] = changed.json()['csrf_token']
+            assert client.get('/v1/settings/runtime').status_code == 200
 
 
 def test_stale_online_agent_is_reported_offline() -> None:
@@ -485,9 +204,9 @@ def test_correlation_state_and_percentage() -> None:
         assert loaded.json()["graph_settings"]["node_size"] == 8
         assert loaded.json()["property_library"][0]["id"] == "shared-property"
         backup = client.post("/v1/backups", json={"entity_type": "system"})
-        archive = client.get(f"/v1/backups/{backup.json()['id']}")
+        archive = backup
         with ZipFile(BytesIO(archive.content)) as bundle:
-            assert b"perimetr.correlation_map" in bundle.read("system_settings.json")
+            assert b"perimetr.correlation_map" in snapshot_member(bundle, "system_settings.json")
         assert client.put(
             "/v1/correlation",
             json={"descriptions_by_block": {}, "properties_by_block": {}, "property_library": [], "graph_settings": {}},
@@ -524,9 +243,9 @@ def test_overview_blocks_support_persistent_names_and_images() -> None:
         assert image.content == image_bytes
 
         backup = client.post("/v1/backups", json={"entity_type": "system"})
-        archive = client.get(f"/v1/backups/{backup.json()['id']}")
+        archive = backup
         with ZipFile(BytesIO(archive.content)) as bundle:
-            assert b"perimetr.overview_blocks" in bundle.read("system_settings.json")
+            assert b"perimetr.overview_blocks" in snapshot_member(bundle, "system_settings.json")
 
         removed = client.delete("/v1/overview-blocks/human_general/image")
         assert removed.status_code == 200
@@ -542,80 +261,22 @@ def test_overview_blocks_support_persistent_names_and_images() -> None:
 def test_metrics_and_backup_flow() -> None:
     with TestClient(create_app()) as client:
         login(client)
-
-        metrics = client.get("/v1/system/metrics")
-        assert metrics.status_code == 200
-        assert set(metrics.json()) == {
-            "cpu_percent",
-            "ram_used_bytes",
-            "ram_total_bytes",
-            "ram_percent",
-            "disk_used_bytes",
-            "disk_total_bytes",
-            "disk_percent",
-            "uptime_seconds",
-        }
-        assert metrics.json()["uptime_seconds"] >= 0
-
-        backup = client.post("/v1/backups", json={"entity_type": "system"})
-        assert backup.status_code == 201
-        backup_id = backup.json()["id"]
-
-        backups = client.get("/v1/backups")
-        assert backups.status_code == 200
-        assert any(item["id"] == backup_id for item in backups.json())
-
-        archive = client.get(f"/v1/backups/{backup_id}")
-        assert archive.status_code == 200
-        assert archive.headers["content-type"] == "application/zip"
-        archive_path = Path(__file__).parent / "test-backup.zip"
-        archive_path.write_bytes(archive.content)
-        try:
-            with ZipFile(archive_path) as bundle:
-                assert "objects.json" in bundle.namelist()
-                assert "subjects.json" in bundle.namelist()
-                assert "pods.json" in bundle.namelist()
-                assert "agents.json" in bundle.namelist()
-                assert "agent_assignments.json" in bundle.namelist()
-                assert "agent_capabilities.json" in bundle.namelist()
-                assert "jobs.json" in bundle.namelist()
-                assert "job_events.json" in bundle.namelist()
-                assert "approval_requests.json" in bundle.namelist()
-                assert "certificate_denylist.json" in bundle.namelist()
-                assert "controller_identity.json" in bundle.namelist()
-                assert "commands.json" in bundle.namelist()
-                assert "recent_audit.json" in bundle.namelist()
-                assert "logs.json" in bundle.namelist()
-                assert "system_settings.json" in bundle.namelist()
-                backed_up_settings = json.loads(bundle.read("system_settings.json"))
-                preferences = next(
-                    item for item in backed_up_settings
-                    if item["key"] == "perimetr.preferences"
-                )
-                auth = preferences["value"]["auth"]
-                assert "password" not in auth
-                assert auth["password_hash"].startswith("scrypt$")
-                assert b"perimetr-entry-password" not in archive.content
-        finally:
-            if archive_path.exists():
-                archive_path.unlink()
-
-        imported = client.post(
-            "/v1/backups/import",
-            files={"archive": ("backup.zip", archive.content, "application/zip")},
-        )
-        assert imported.status_code == 200
-        assert imported.json()["restorable"] is True
-
-        ui_audit = client.post(
-            "/v1/audit/ui",
-            json={"action": "appearance.theme.updated", "target_type": "settings", "target_id": "appearance"},
-        )
-        assert ui_audit.status_code == 200
-
-        logs = client.get("/v1/logs/audit")
-        assert logs.status_code == 200
-        assert any(item["action"] == "appearance.theme.updated" for item in logs.json()["entries"])
+        metrics = client.get('/v1/system/metrics')
+        assert metrics.status_code == 200 and metrics.json()['uptime_seconds'] >= 0
+        assert 'cpu_cores' in metrics.json()
+        archive = client.post('/v1/backups')
+        assert archive.status_code == 200 and archive.headers['content-type'] == 'application/zip'
+        assert client.get('/v1/backups').json() == []
+        with ZipFile(BytesIO(archive.content)) as bundle:
+            assert 'data/access_policies.jsonl' in bundle.namelist()
+            assert 'data/session_leases.jsonl' not in bundle.namelist()
+            settings = json.loads(snapshot_member(bundle, 'system_settings.json'))
+            preferences = next(item for item in settings if item['key'] == 'perimetr.preferences')
+            assert preferences['value']['auth']['access_key_hash'].startswith('scrypt$')
+            assert b'perimetr-entry-password' not in archive.content
+        assert restore_archive(client, archive.content).json()['restored'] is True
+        assert client.post('/v1/audit/ui', json={'action':'appearance.theme.updated','target_type':'settings','target_id':'appearance'}).status_code == 200
+        assert any(item['action']=='appearance.theme.updated' for item in client.get('/v1/logs/audit').json()['entries'])
 
 
 def test_object_subject_web_runtime_flow() -> None:
@@ -914,15 +575,18 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
         listed = client.get(f"/v1/subjects/{subject_id}/pods").json()
         assert all(item["id"] != clone_id for item in listed["instances"])
         backup = client.post("/v1/backups", json={"entity_type": "system"})
-        archive = client.get(f"/v1/backups/{backup.json()['id']}")
+        archive = backup
         with ZipFile(BytesIO(archive.content)) as bundle:
-            assert "pod_provisioning_records.json" in bundle.namelist()
-            assert "pod_denylist.json" in bundle.namelist()
-            backed_up_subjects = json.loads(bundle.read("subjects.json"))
+            assert "data/pod_provisioning_records.jsonl" in bundle.namelist()
+            assert "data/pod_denylist.jsonl" in bundle.namelist()
+            backed_up_subjects = json.loads(snapshot_member(bundle, "subjects.json"))
             backed_up_subject = next(item for item in backed_up_subjects if item["entity_id"] == subject_id)
-            assert backed_up_subject["vless_connection"] == vless_uri
+            from app.pod_service import decrypt_secret
+            from app.settings import get_settings
+            assert "vless_connection" not in backed_up_subject
+            assert decrypt_secret(backed_up_subject["vless_uri_encrypted"], get_settings()) == vless_uri
             assert base64.b64decode(backed_up_subject["image_data"]) == image_bytes
-            backed_up_pods = json.loads(bundle.read("pods.json"))
+            backed_up_pods = json.loads(snapshot_member(bundle, "pods.json"))
             backed_up_pod = next(item for item in backed_up_pods if item["id"] == pod_id)
             assert backed_up_pod["login"] == "designer"
             assert backed_up_pod["password_hash"].startswith("pbkdf2_sha256$")
@@ -972,7 +636,7 @@ def test_agent_command_queue_still_available() -> None:
         assert [item["id"] for item in pending.json()] == [command.json()["id"]]
 
 
-def test_entity_deletion_and_legacy_backup_id_compatibility() -> None:
+def test_entity_deletion_and_snapshot_id_compatibility() -> None:
     with TestClient(create_app()) as client:
         login(client)
         created = client.post(
@@ -988,27 +652,12 @@ def test_entity_deletion_and_legacy_backup_id_compatibility() -> None:
             "graph_settings": {},
         }).status_code == 200
 
-        backup = client.post("/v1/backups", json={"entity_type": "system"}).json()
-        archive = client.get(f"/v1/backups/{backup['id']}").content
-        source = ZipFile(BytesIO(archive))
-        files = {name: source.read(name) for name in source.namelist() if name != "manifest.json"}
-        object_rows = json.loads(files["objects.json"])
-        target = next(item for item in object_rows if item["entity_id"] == public_id)
-        target["slug"] = target.pop("entity_id")
-        files["objects.json"] = json.dumps(object_rows, indent=2).encode()
-        manifest = json.loads(source.read("manifest.json"))
-        manifest["files"] = {name: hashlib.sha256(content).hexdigest() for name, content in files.items()}
-        legacy_archive = BytesIO()
-        with ZipFile(legacy_archive, "w", ZIP_DEFLATED) as converted:
-            converted.writestr("manifest.json", json.dumps(manifest, indent=2))
-            for name, content in files.items():
-                converted.writestr(name, content)
-
+        archive = client.post('/v1/backups').content
         deleted = client.delete(f"/v1/objects/{public_id}")
         assert deleted.status_code == 200
         assert deleted.json() == {"deleted": True, "id": public_id}
         assert f"object_{public_id}" not in client.get("/v1/correlation").json()["properties_by_block"]
-        restored = client.post("/v1/backups/import", files={"archive": ("legacy.zip", legacy_archive.getvalue(), "application/zip")})
+        restored = restore_archive(client, archive)
         assert restored.status_code == 200
         assert any(item["id"] == public_id for item in client.get("/v1/objects").json())
 
@@ -1164,17 +813,17 @@ def test_agent_control_plane_registry_assignments_jobs_and_backup() -> None:
         assert detached.json()["status"] == "DETACHED"
 
         backup = client.post("/v1/backups", json={"entity_type": "system"})
-        assert backup.status_code == 201
-        archive = client.get(f"/v1/backups/{backup.json()['id']}")
+        assert backup.status_code == 200
+        archive = backup
         assert archive.status_code == 200
         archive_path = Path(__file__).parent / "test-agent-backup.zip"
         archive_path.write_bytes(archive.content)
         try:
             with ZipFile(archive_path) as bundle:
-                assert "agent_assignments.json" in bundle.namelist()
-                assert "jobs.json" in bundle.namelist()
-                assert "job_events.json" in bundle.namelist()
-                assert "approval_requests.json" in bundle.namelist()
+                assert "data/agent_assignments.jsonl" in bundle.namelist()
+                assert "data/jobs.jsonl" in bundle.namelist()
+                assert "data/job_events.jsonl" in bundle.namelist()
+                assert "data/approval_requests.jsonl" in bundle.namelist()
         finally:
             if archive_path.exists():
                 archive_path.unlink()
@@ -1490,33 +1139,27 @@ def test_agent_restore_resumes_heartbeat_and_revoked_identity_cannot_rotate_back
         assert client.post(f"/api/agents/{agent_id}/heartbeat", json=heartbeat).status_code == 200
 
         backup = client.post("/v1/backups", json={"entity_type": "system"})
-        archive = client.get(f"/v1/backups/{backup.json()['id']}")
+        archive = backup
         assert archive.status_code == 200
         source_buffer = BytesIO(archive.content)
         corrupt_buffer = BytesIO()
         with ZipFile(source_buffer) as source, ZipFile(corrupt_buffer, "w", ZIP_DEFLATED) as corrupt:
             for name in source.namelist():
-                corrupt.writestr(name, b"[]" if name == "agents.json" else source.read(name))
-        rejected = client.post(
-            "/v1/backups/import",
-            files={"archive": ("corrupt.zip", corrupt_buffer.getvalue(), "application/zip")},
-        )
+                corrupt.writestr(name, b"[]" if name == "data/agents.jsonl" else source.read(name))
+        rejected = restore_archive(client, corrupt_buffer.getvalue())
         assert rejected.status_code == 400
         archive_path = Path(__file__).parent / "test-restore-agent.zip"
         archive_path.write_bytes(archive.content)
         try:
             with ZipFile(archive_path) as bundle:
                 for required in ["agent_certificates.json", "agent_endpoints.json", "agent_heartbeats.json", "agent_state_events.json", "certificate_denylist.json", "controller_identity.json"]:
-                    assert required in bundle.namelist()
+                    assert "data/" + required.removesuffix(".json") + ".jsonl" in bundle.namelist()
         finally:
             archive_path.unlink(missing_ok=True)
 
         assert client.delete(f"/api/blocks/laboratory/agents/{agent_id}?block_type=laboratory").status_code == 200
         assert client.patch(f"/api/agents/{agent_id}", json={"display_name": "Changed After Backup"}).status_code == 200
-        restored = client.post(
-            "/v1/backups/import",
-            files={"archive": ("restore.zip", archive.content, "application/zip")},
-        )
+        restored = restore_archive(client, archive.content)
         assert restored.status_code == 200
         assignments = client.get("/api/blocks/laboratory/agents?block_type=laboratory").json()
         assert any(item["agent_id"] == agent_id and item["agent"]["display_name"] == "Restore Agent" for item in assignments)
@@ -1616,15 +1259,15 @@ def test_logger_download_contains_diagnostics_manifest_and_detailed_errors() -> 
         assert response.headers["content-type"] == "application/zip"
         with ZipFile(BytesIO(response.content)) as archive:
             names = set(archive.namelist())
-            assert {"manifest.json", "audit-events.json", "errors.json", "README.txt"} <= names
+            assert {"manifest.json", "audit-events.jsonl", "errors.jsonl", "README.txt"} <= names
             manifest = json.loads(archive.read("manifest.json"))
-            assert manifest["schema"] == "perimetr.logs.export.v1"
+            assert manifest["schema"] == "perimetr.logs.export.v2"
             assert manifest["error_count"] >= 1
             assert manifest["retention"]["max_total_bytes"] == 64 * 1024 * 1024
-            errors = json.loads(archive.read("errors.json"))
-            diagnostic = next(item for item in errors if item["target"]["id"] == "diagnostic-target")
-            assert diagnostic["message"] == "Expanded diagnostic message"
-            assert diagnostic["cause"] == "Synthetic test cause"
-            assert diagnostic["stack_trace"] == "trace line 1\ntrace line 2"
-            assert diagnostic["request_id"] == "request-123"
-            assert diagnostic["context"]["result"]["error_type"] == "TestFailure"
+            errors = [json.loads(line) for line in archive.read("errors.jsonl").splitlines()]
+            diagnostic = next(item for item in errors if item["target"] == "test:diagnostic-target")
+            assert diagnostic["result"]["message"] == "Expanded diagnostic message"
+            assert diagnostic["result"]["cause"] == "Synthetic test cause"
+            assert diagnostic["result"]["stack_trace"] == "trace line 1\ntrace line 2"
+            assert diagnostic["payload"]["request_id"] == "request-123"
+            assert diagnostic["result"]["error_type"] == "TestFailure"

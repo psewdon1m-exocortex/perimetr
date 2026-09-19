@@ -8,24 +8,39 @@ from app.kernel_register import (
     KernelRegisterError,
     _verify_snapshot,
     _write_cache,
-    _registered_kernel_url,
     apply_register,
     load_snapshot,
 )
 from app.settings import Settings
 
 
+def reference(number: int) -> str:
+    return f"volt://{number:08x}-1111-4111-8111-111111111111/{number:08x}-2222-4222-8222-222222222222"
+
+
+RESOLVED = {
+    "repositories.perimetr.url": "https://github.com/example/perimetr",
+    "repositories.pod.url": "https://github.com/example/pod",
+    "services.perimetr.sni": "perimetr.internal",
+    "services.perimetr.port": "18443",
+    "intervals.kernel.refresh_sec": "60",
+}
+
+
 def snapshot(values=None):
+    references = {key: reference(index + 1) for index, key in enumerate(RESOLVED)}
     values = values or {
         "repositories": {
-            "perimetr": {"url": "https://github.com/example/perimetr"},
-            "pod": {"url": "https://github.com/example/pod"},
+            "perimetr": {"url": references["repositories.perimetr.url"]},
+            "pod": {"url": references["repositories.pod.url"]},
         },
         "services": {
-            "kernel": {"sni": "kernel.internal", "port": "18180"},
-            "perimetr": {"sni": "perimetr.internal", "port": "18443"},
+            "perimetr": {
+                "sni": references["services.perimetr.sni"],
+                "port": references["services.perimetr.port"],
+            },
         },
-        "intervals": {"kernel": {"refresh_sec": "60"}},
+        "intervals": {"kernel": {"refresh_sec": references["intervals.kernel.refresh_sec"]}},
     }
     canonical = json.dumps(
         {"values": values},
@@ -48,15 +63,6 @@ def test_invalid_snapshot_is_rejected():
     payload["values"]["services"]["perimetr"]["sni"] = "changed.invalid"
     with pytest.raises(KernelRegisterError, match="checksum"):
         _verify_snapshot(payload)
-
-
-def test_registered_kernel_url_uses_snapshot_sni_and_port():
-    assert (
-        _registered_kernel_url(
-            snapshot(), "https://127.0.0.1:18180/bootstrap?ignored=true"
-        )
-        == "https://kernel.internal:18180"
-    )
 
 
 def test_unavailable_kernel_uses_validated_last_known_good(tmp_path):
@@ -83,7 +89,7 @@ def test_unchanged_revision_uses_conditional_get_and_cached_snapshot(tmp_path, m
     def not_modified(request, timeout):
         assert timeout == 0.5
         assert request.full_url == (
-            "https://kernel.internal:18180/api/v1/register/snapshot"
+            "https://kernel.internal/api/v1/register/snapshot"
         )
         assert request.get_header("If-none-match") == f'"{payload["revision"]}"'
         raise HTTPError(request.full_url, 304, "Not Modified", {}, None)
@@ -102,6 +108,7 @@ def test_unchanged_revision_uses_conditional_get_and_cached_snapshot(tmp_path, m
 def test_register_builds_perimetr_url_from_registered_sni_and_port(tmp_path, monkeypatch):
     payload = snapshot()
     monkeypatch.setattr("app.kernel_register.load_snapshot", lambda **_: payload)
+    monkeypatch.setattr("app.kernel_register.resolve_values", lambda **_: RESOLVED)
     settings = Settings(
         _env_file=None,
         kernel_url="https://kernel.internal",
@@ -123,13 +130,13 @@ def test_register_builds_perimetr_url_from_registered_sni_and_port(tmp_path, mon
 
 
 def test_register_omits_standard_https_port(tmp_path, monkeypatch):
-    values = snapshot()["values"]
-    values["services"]["perimetr"] = {
-        "sni": "perimetr.example.com",
-        "port": "443",
-    }
-    payload = snapshot(values)
+    payload = snapshot()
     monkeypatch.setattr("app.kernel_register.load_snapshot", lambda **_: payload)
+    monkeypatch.setattr("app.kernel_register.resolve_values", lambda **_: {
+        **RESOLVED,
+        "services.perimetr.sni": "perimetr.example.com",
+        "services.perimetr.port": "443",
+    })
     settings = Settings(
         _env_file=None,
         kernel_url="https://kernel.example.com",

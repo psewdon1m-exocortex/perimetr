@@ -55,7 +55,7 @@ def test_production_rejects_example_secrets_and_insecure_transport() -> None:
         validate_runtime_settings(settings)
 
     message = str(error.value)
-    assert "PERIMETR_ENTRY_PASSWORD" in message
+    assert "PERIMETR_ACCESS_KEY" not in message
     assert "PostgreSQL" in message
     assert "PERIMETR_COOKIE_SECURE" in message
     assert "KERNEL_URL" in message

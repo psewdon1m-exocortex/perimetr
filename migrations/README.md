@@ -1,5 +1,7 @@
 # Perimetr database migrations
 
+This document specializes [Part 05 — CI, releases and local updates](https://github.com/psewdon1m-exocortex/general/blob/8737b50f0aca4b84f4fa223272bdfb63ade05d33/PART_05_CI_RELEASES_AND_LOCAL_UPDATES.md); that central contract remains authoritative.
+
 Production starts only after `alembic upgrade head` succeeds. The
 `alembic_version` table is the authoritative current schema version. Every model
 change must include one numbered revision, one upgrade strategy, one explicit
@@ -71,3 +73,11 @@ retain primary-only authentication, while newly provisioned Pods may store a
 separate salted decoy-password hash. The change is additive and contains no
 plaintext credential migration. Downgrade removes only the two new columns, so
 the `0004` image can read a database downgraded from `0005`.
+
+## Revision 0006: single-operator Access Key
+
+Preserves an existing salted verifier, removes the obsolete username/auth fields,
+and revokes direct sessions. The previous exact password becomes the Access Key.
+Pod credentials remain independent. The migration is forward-only: rollback
+requires the matching old image and its saved pre-migration database. See
+[recovery](../docs/recovery.md) before upgrading.

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .enums import AgentType, ObjectKind, RuntimeType
 
@@ -19,11 +19,12 @@ class ErrorResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     service: str
+    version: str | None = None
 
 
 class DirectLoginRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=1, max_length=1024)
+    model_config = ConfigDict(extra="forbid", strict=True)
+    access_key: str
     target: str = "perimetr"
 
 
@@ -32,6 +33,20 @@ class DirectLoginRead(BaseModel):
     target: str
     transport: str
     renderer_url: str
+    csrf_token: str
+
+
+class PodLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    username: str
+    password: str
+
+
+class AccessKeyChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    current_key: str
+    new_key: str
+    confirm_key: str
 
 
 class StatusResponse(BaseModel):
@@ -42,13 +57,14 @@ class StatusResponse(BaseModel):
 
 
 class SystemMetricsRead(BaseModel):
-    cpu_percent: float
-    ram_used_bytes: int
-    ram_total_bytes: int
-    ram_percent: float
-    disk_used_bytes: int
-    disk_total_bytes: int
-    disk_percent: float
+    cpu_percent: float | None
+    cpu_cores: int | None
+    ram_used_bytes: int | None
+    ram_total_bytes: int | None
+    ram_percent: float | None
+    disk_used_bytes: int | None
+    disk_total_bytes: int | None
+    disk_percent: float | None
     uptime_seconds: int
 
 

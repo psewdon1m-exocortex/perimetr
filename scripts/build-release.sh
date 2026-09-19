@@ -8,9 +8,14 @@ repository="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 image_reference="${IMAGE_REFERENCE:?IMAGE_REFERENCE is required}"
 image_digest="${IMAGE_DIGEST:?IMAGE_DIGEST is required}"
 updater_dir="${UPDATER_BUNDLE_DIR:?UPDATER_BUNDLE_DIR is required}"
-updater_version="${UPDATER_BUNDLE_VERSION:?UPDATER_BUNDLE_VERSION is required}"
+updater_version="$(cat "$root/.release/updater.version")"
 
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 2
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ && "$version" != 0.0.0 ]] || exit 2
+[[ "$version" == "$(cat "$root/VERSION")" ]] || exit 2
+[[ "$image_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 2
+[[ "$image_reference" =~ ^ghcr.io/[a-z0-9_./-]+$ ]] || exit 2
+[[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 2
+python "$root/scripts/release-inputs.py" --validate-only
 [[ -f "$updater_dir/install.sh" && -f "$updater_dir/updater-linux-amd64" ]] || {
   echo "Verified Updater install bundle is incomplete" >&2
   exit 3
@@ -27,11 +32,13 @@ updater_version="${UPDATER_BUNDLE_VERSION:?UPDATER_BUNDLE_VERSION is required}"
 mkdir -p "$root/$output"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
-cp "$root/compose.yaml" "$root/compose.production.yaml" "$root/.env.example" \
-  "$root/install.sh" "$root/bootstrap.sh" "$root/nginx.security.conf" "$stage/"
+cp "$root/compose.production.yaml" "$root/.env.example" \
+  "$root/install.sh" "$root/nginx.security.conf" "$stage/"
+mkdir "$stage/scripts"
+cp "$root/scripts/installer-env.py" "$root/scripts/sync-kernel-env.py" "$stage/scripts/"
 cp -R "$updater_dir" "$stage/updater"
 find "$stage/updater" -type f -name '*.sh' -exec chmod 0755 {} +
-chmod 0755 "$stage/install.sh" "$stage/bootstrap.sh" "$stage/updater/updater-linux-amd64"
+chmod 0755 "$stage/install.sh" "$stage/updater/updater-linux-amd64"
 sed -i \
   -e "s|^PERIMETR_VERSION=.*|PERIMETR_VERSION=$version|" \
   -e "s|^PERIMETR_IMAGE=.*|PERIMETR_IMAGE=${image_reference}@${image_digest}|" \

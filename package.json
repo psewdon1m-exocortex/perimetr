@@ -1,0 +1,7 @@
+{
+  "name": "perimetr-browser-checks",
+  "private": true,
+  "version": "2.0.0",
+  "scripts": {"test:browser": "node scripts/browser-smoke.cjs"},
+  "devDependencies": {"playwright": "1.62.1"}
+}
