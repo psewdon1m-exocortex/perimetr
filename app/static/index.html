@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />
   <title>perimetr</title>
+  <link rel="icon" type="image/png" sizes="1254x1254" href="/assets/perimetr-icon.png?v=7e7edac3" />
   <link rel="stylesheet" href="/assets/core.css" />
   <link rel="stylesheet" href="/assets/unified.css" />
 </head>
@@ -12,15 +13,14 @@
   <div id="notificationStack" class="notification-stack" aria-live="polite"></div>
   <div class="sidebar-zone" aria-hidden="true"></div>
   <aside class="sidebar">
-    <div class="brand" aria-label="PERIMETR"><span aria-hidden="true">P</span><span aria-hidden="true">E</span><span aria-hidden="true">R</span><span aria-hidden="true">I</span><span aria-hidden="true">M</span><span aria-hidden="true">E</span><span aria-hidden="true">T</span><span aria-hidden="true">R</span></div>
+    <div class="brand" aria-label="perimetr"><img class="service-icon" src="/assets/perimetr-icon.png?v=7e7edac3" width="192" height="192" alt="" draggable="false" /><span class="service-wordmark">perimetr</span></div>
     <nav class="nav">
       <button draggable="true" data-view="dashboard" class="active"><span>Dashboard</span><small>01</small></button>
       <button draggable="true" data-view="overview"><span>Overview</span><small>02</small></button>
       <button draggable="true" data-view="correlationMap"><span>Correlation Map</span><small>03</small></button>
-      <button draggable="true" data-view="agents"><span>Agents</span><small>04</small></button>
-      <button draggable="true" data-view="pods"><span>Pods</span><small>05</small></button>
-      <button draggable="true" data-view="properties"><span>Properties</span><small>06</small></button>
-      <button draggable="true" data-view="settings"><span>Settings</span><small>07</small></button>
+      <button draggable="true" data-view="pods"><span>Pods</span><small>04</small></button>
+      <button draggable="true" data-view="properties"><span>Properties</span><small>05</small></button>
+      <button draggable="true" data-view="settings"><span>Settings</span><small>06</small></button>
     </nav>
     <div class="sidebar-footer">
       <button data-view="documentation">Documentation</button>
@@ -35,43 +35,30 @@
 
     <section id="dashboard" class="view active">
       <div class="grid3 dashboard-metrics">
-        <div class="card metric" draggable="true" data-metric-id="cpu">
+        <div class="card metric" data-metric-id="cpu">
           <h2>CPU Usage</h2>
-          <div class="metric-value" id="cpuPercent">—</div><p id="cpuCores" class="hint">Host CPU · cores unknown</p>
+          <p class="metric-reading"><span id="cpuPercent">Unavailable</span><span id="cpuCores">Cores unknown</span></p>
+          <div id="cpuProgress" class="metric-progress" role="progressbar" aria-label="CPU usage" hidden><span></span></div>
         </div>
-        <div class="card metric" draggable="true" data-metric-id="ram">
+        <div class="card metric" data-metric-id="ram">
           <h2>RAM Usage</h2>
-          <div class="metric-lines">
-            <div><span>used</span><strong id="ramUsed">-</strong></div>
-            <div><span>total</span><strong id="ramTotal">-</strong></div>
-            <div><span>percent</span><strong id="ramPercent">-</strong></div>
-          </div>
+          <p class="metric-reading"><span id="ramPercent">Unavailable</span><span><span id="ramUsed">—</span> / <span id="ramTotal">—</span></span></p>
+          <div id="ramProgress" class="metric-progress" role="progressbar" aria-label="RAM usage" hidden><span></span></div>
         </div>
-        <div class="card metric" draggable="true" data-metric-id="disk">
-          <h2>Data Volume</h2>
-          <div class="metric-lines">
-            <div><span>used</span><strong id="diskUsed">-</strong></div>
-            <div><span>total</span><strong id="diskTotal">-</strong></div>
-            <div><span>percent</span><strong id="diskPercent">-</strong></div>
-          </div>
+        <div class="card metric" data-metric-id="disk">
+          <h2>Disk Usage</h2>
+          <p class="metric-reading"><span id="diskPercent">Unavailable</span><span><span id="diskUsed">—</span> / <span id="diskTotal">—</span></span></p>
+          <div id="diskProgress" class="metric-progress" role="progressbar" aria-label="Data volume usage" hidden><span></span></div>
         </div>
-        <div class="card metric" draggable="true" data-metric-id="correlation">
+        <div class="card metric" data-metric-id="uptime">
+          <h2>Uptime</h2>
+          <p class="metric-reading">Active: <span id="systemUptime">Unavailable</span></p>
+        </div>
+        <div class="card metric" data-metric-id="correlation">
           <h2>System Correlation</h2>
-          <div class="metric-value" id="correlationPercent">0%</div>
-          <div class="metric-lines"><div><span>shared properties</span><strong id="correlationState">none</strong></div></div>
+          <p class="metric-reading"><span id="correlationPercent">0%</span></p>
+          <p class="hint">Shared properties: <span id="correlationState">none</span></p>
         </div>
-        <div class="card metric" draggable="true" data-metric-id="uptime">
-          <h2>Service Uptime</h2>
-          <div class="metric-value" id="systemUptime">-</div>
-        </div>
-      </div>
-    </section>
-
-    <section id="agents" class="view">
-      <div class="library-page">
-        <label class="library-search"><span>SEARCH</span><input id="agentsPageSearch" type="search" placeholder="Search agents" aria-label="Search agents" autocomplete="off" /></label>
-        <div id="agentsPageList" class="library-page-list"></div>
-        <button class="agent-add-button" data-add-agent-library="true" aria-label="add agent">+</button>
       </div>
     </section>
 
@@ -86,7 +73,7 @@
       <div class="library-page">
         <label class="library-search"><span>SEARCH</span><input id="propertiesPageSearch" type="search" placeholder="Search properties" aria-label="Search properties" autocomplete="off" /></label>
         <div id="propertiesPageList" class="library-page-list"></div>
-        <button class="agent-add-button" data-add-library-property="true" aria-label="add property">+</button>
+        <button class="collection-add-button" data-add-library-property="true" aria-label="add property">+</button>
       </div>
     </section>
 
@@ -141,6 +128,7 @@
             <label class="correlation-control"><span>Link force</span><output id="graphLinkForceValue">0.025</output><input id="graphLinkForce" type="range" min="0" max="0.15" step="0.005" value="0.025" /></label>
             <label class="correlation-control"><span>Link distance</span><output id="graphLinkDistanceValue">150</output><input id="graphLinkDistance" type="range" min="30" max="300" step="5" value="150" /></label>
           </section>
+          <section><details><summary>Relationship list</summary><div id="graphRelationshipList" aria-label="Property and entity relationships"></div></details></section>
           <div class="graph-legend"><span style="--legend-color:var(--light)">property</span><span style="--legend-color:var(--accent)">entity</span></div>
         </aside>
       </div>
@@ -148,7 +136,7 @@
 
     <section id="settings" class="view">
       <div class="settings-grid">
-        <div class="card settings-card">
+        <div class="card settings-card appearance-card">
           <h2>Appearance</h2>
           <div class="setting-group">
             <h3>Color correction</h3>
@@ -156,12 +144,12 @@
             <div class="accent-controls"><input id="colorAccent" aria-label="Accent color" type="color" value="#00a8ff" /><input id="accentHex" aria-label="Accent hex" value="#00A8FF" spellcheck="false" /><button id="resetTheme">Reset color</button><button id="applyTheme">Apply color</button></div>
           </div>
           <div class="setting-group">
-            <h3>Left menu</h3>
-            <label class="check"><input id="sidebarAuto" type="checkbox" checked /> Auto open and hide sidebar on mouse hover</label>
-            <p class="hint">Disable this option to keep the left menu fixed open.</p>
+            <h3>Left menu position</h3>
+            <p class="hint">Reveal the sidebar from the edge or keep it fixed on wide screens.</p>
+            <label class="check"><input id="sidebarAuto" type="checkbox" /> Auto open and hide sidebar on mouse hover</label>
           </div>
         </div>
-        <div class="card settings-card">
+        <div class="card settings-card security-card">
           <h2>Security</h2>
           <div class="setting-group">
             <h3>Changing Access Key</h3>
@@ -170,36 +158,31 @@
               <button id="openPasswordModal" class="primary">Change Access Key</button>
             </div>
           </div>
-          <div class="setting-group"><h3>Connection with Kernel</h3><label>Kernel origin<input id="kernelOrigin" type="url" autocomplete="off" /></label><p id="kernelStatus" class="hint" aria-live="polite">Checking configuration…</p><div class="actions"><button id="saveKernelOrigin">Save origin</button><button id="checkKernel">Check connection</button><button id="openKernelToken">Change Kernel access token</button></div></div>
+          <div class="setting-group kernel-group"><h3>Connection with Kernel</h3><div class="kernel-row"><label class="visually-hidden" for="kernelOrigin">Kernel origin</label><input id="kernelOrigin" type="url" autocomplete="off" placeholder="https://kernel.example.net" /><div id="kernelReachability" class="status-row"><span>Kernel Core:</span><span class="status-observation"><span id="kernelStatus" aria-live="polite">Checking configuration…</span><i class="status-square" aria-hidden="true"></i></span></div></div><button id="openKernelToken">Change secure Kernel access token</button><p id="kernelDetail" class="hint" role="status"></p></div>
         </div>
-        <div class="card settings-card">
+        <div class="card settings-card backup-card">
           <h2>Backup</h2>
           <div class="setting-group">
             <h3>System snapshot</h3>
             <p class="hint">Download all authoritative data, identity ciphertext, policies, settings and audit. Keep the recovery secret separately; active sessions are excluded.</p>
             <div class="actions">
-              <button id="createBackup" class="primary">Create Backup</button>
+              <button id="createBackup" class="primary">Create and download snapshot</button>
             </div>
           </div>
           <div class="setting-group">
-            <h3>Restore</h3>
-            <p class="hint">Import a backup zip created by this Perimetr instance.</p>
+            <h3>Restore snapshot</h3>
+            <p class="hint">Validate a local ZIP before replacing this instance. Keep its recovery secret separately.</p>
             <div class="actions">
-              <button id="openImportBackupModal">Import Backup</button>
+              <button id="openImportBackupModal">Browse local snapshot archive</button>
             </div>
           </div>
         </div>
-        <div class="card settings-card"><h2>Updates</h2><div class="setting-group"><h3>Service and helper updates</h3><p class="hint">Check installed versions and the current published releases.</p><div id="updaterAvailability" class="hint">Checking helper availability…</div><button id="checkForUpdates" class="entry-action">Check for Updates</button></div></div>
+        <div class="card settings-card updates-card"><h2>Updates</h2><div class="setting-group"><h3>Update pipeline</h3><p class="hint">Discover verified releases and install them through the local update helper.</p><p class="version-line">Perimetr version: <strong id="installedAppVersion">Checking…</strong></p><div id="updaterStatusRow" class="status-row"><span>Update helper:</span><span class="status-observation"><span id="updaterAvailability">Checking availability…</span><i class="status-square" aria-hidden="true"></i></span></div><div id="registryStatusRow" class="status-row"><span>Release registry:</span><span class="status-observation"><span id="registryAvailability">Not checked</span><i class="status-square" aria-hidden="true"></i></span></div><button id="checkForUpdates" class="entry-action">Check for updates</button></div><div class="setting-group"><h3>Updater version</h3><p class="hint">The shared helper has its own version and update lifecycle.</p><p class="version-line">Installed: <strong id="installedHelperVersion">Unknown</strong></p><button id="checkHelperUpdates" class="entry-action">Check Updater for updates</button></div></div>
         <div class="card settings-card logger-card">
-          <div class="log-head">
-            <h2>Logs</h2>
-            <a class="button" href="/v1/logs/download">Download Logs Zip</a>
-          </div>
+          <h2>Logs</h2>
           <div class="setting-group">
-            <h3>Action stream</h3>
-            <p class="hint">Shows actions from the browser UI and API operations with time, responsible actor and target.</p>
-            <p id="loggerRetention" class="hint">Retention limits are loading.</p>
-            <button id="olderLogs">Load older events</button><div id="loggerStream" class="log-stream">not loaded</div>
+            <div class="log-command-band"><p class="hint">Live actions and outcomes, including the responsible actor and target.</p><a class="button" href="/v1/logs/download">Download archived logs</a></div>
+            <div class="log-table"><div class="log-columns" aria-hidden="true"><span>TYPE</span><span>BODY</span><span>TIME</span></div><div id="loggerStream" class="log-stream" tabindex="0" aria-label="Live audit events">Loading events…</div></div><button id="olderLogs">Load older events</button><p id="loggerRetention" class="hint log-retention">Retention limits are loading.</p>
           </div>
         </div>
       </div>
@@ -209,7 +192,7 @@
       <div class="documentation-page">
         <aside class="documentation-nav">
           <div class="documentation-nav-inner">
-            <input id="documentationSearch" type="search" placeholder="Search documentation" aria-label="search documentation" />
+            <input id="documentationSearch" type="search" placeholder="Search guide" aria-label="Search documentation" />
             <div class="documentation-nav-group">
               <strong>Get Started</strong>
               <a href="#docs-introduction">Introduction</a>
@@ -222,7 +205,6 @@
               <a href="#docs-concepts">Core Concepts</a>
               <a href="#docs-workflow">Objects And Subjects</a>
               <a href="#docs-correlation">Properties And Correlation</a>
-              <a href="#docs-agents">Agent Nodes</a>
               <a href="#docs-pods">Pods</a>
             </div>
             <div class="documentation-nav-group">
@@ -238,13 +220,13 @@
           <header>
             <span class="documentation-kicker">Perimetr / Operator Guide</span>
             <h2>Welcome To Perimetr</h2>
-            <p>A practical guide to installing, configuring and operating the logical core, its entities, shared data, Agent Nodes and Subject Pods.</p>
+            <p>A practical guide to installing, configuring and operating the logical core, its entities, shared data and Subject Pods.</p>
           </header>
           <article id="docs-introduction" data-doc-title="Introduction architecture purpose">
             <h2>Introduction</h2>
-            <p>Perimetr is the authoritative logical and operational core. It stores Objects, Subjects, shared Properties, correlation state, Agent Nodes, Pod identities, security deny-lists and audit events.</p>
+            <p>Perimetr is the authoritative logical and operational core. It stores Objects, Subjects, shared Properties, correlation state, Pod identities, security deny-lists and audit events.</p>
             <p>Laboratory and desktop Gate clients are external modules. They consume Perimetr contracts but are not required to operate the core web interface.</p>
-            <div class="documentation-note">Start with an Object when you only need to describe an entity. Transform it into a Subject when the entity requires a controlled browser Pod, network route or attached Agent Nodes.</div>
+            <div class="documentation-note">Start with an Object when you only need to describe an entity. Transform it into a Subject when the entity requires a controlled browser Pod, or network route.</div>
           </article>
           <article id="docs-requirements" data-doc-title="System requirements Docker CPU RAM storage ports">
             <h2>System Requirements</h2>
@@ -262,11 +244,12 @@
           <article id="docs-first-run" data-doc-title="First run login password sidebar security">
             <h2>First Run</h2>
             <ol><li>Sign in with the exact Access Key seeded from <code>.env</code>. The stored verifier is authoritative after initialization.</li><li>Open <code>Settings / Security</code> and rotate the Access Key.</li><li>Open <code>Settings / Appearance</code> and preview and apply the accent color.</li><li>Create a full backup before adding production identities.</li></ol>
-            <p>The left menu is fixed by default. Enable or disable <code>Auto open and hide sidebar on mouse hover</code> to keep it fixed. Navigation tabs can be dragged into a preferred order; Documentation and Logout remain in the bottom operator group.</p>
+            <p>The left menu is fixed by default. Enable <code>Auto open and hide sidebar on mouse hover</code> to reveal it from the left edge, or disable the option to keep it open. On narrow screens, use Toggle navigation. Navigation tabs can be dragged into a preferred order; Documentation and Logout remain in the bottom operator group.</p>
+            <p>Dashboard begins with CPU Usage, RAM Usage, Disk Usage and the current service Uptime. Unknown telemetry is labeled Unavailable. Reorder Dashboard and Settings cards using the four-dot handle, or focus a card and press Alt+Up or Alt+Down. Order and numbered positions survive reload. A failed save restores the last confirmed order.</p>
           </article>
           <article id="docs-concepts" data-doc-title="Core concepts dashboard overview entities ids properties">
             <h2>Core Concepts</h2>
-            <table class="documentation-table"><thead><tr><th>Element</th><th>Responsibility</th></tr></thead><tbody><tr><td>Object</td><td>A described entity without controlled Pod access.</td></tr><tr><td>Subject</td><td>An Object transformed in place while preserving its ID, with Pod and Agent integration.</td></tr><tr><td>Property</td><td>A shared entity referenced by one or more blocks. Editing it updates every reference.</td></tr><tr><td>Agent Node</td><td>A persistent remote execution identity attached to one or more entities.</td></tr><tr><td>Pod</td><td>A device-bound browser gate belonging to one Subject.</td></tr></tbody></table>
+            <table class="documentation-table"><thead><tr><th>Element</th><th>Responsibility</th></tr></thead><tbody><tr><td>Object</td><td>A described entity without controlled Pod access.</td></tr><tr><td>Subject</td><td>An Object transformed in place while preserving its ID, with Pod integration.</td></tr><tr><td>Property</td><td>A shared entity referenced by one or more blocks. Editing it updates every reference.</td></tr><tr><td>Pod</td><td>A device-bound browser gate belonging to one Subject.</td></tr></tbody></table>
             <p>Entity IDs use a stable 16-character uppercase identifier. Renaming an entity changes its visible name but never its ID or existing relations.</p>
           </article>
           <article id="docs-workflow" data-doc-title="Object Subject create transform rename image delete description">
@@ -287,12 +270,6 @@
             <p>The Correlation Map draws entities in the accent color and Property values in the configured light color. Each undirected line means that the Property belongs to the entity. Node size grows slightly with its number of links.</p>
             <p>The correlation percentage is based on Properties shared by multiple entities. Display colors, node size, link thickness and graph forces affect visualization only and do not change stored relations.</p>
           </article>
-          <article id="docs-agents" data-doc-title="Agent Nodes enroll heartbeat commands approval delete detach">
-            <h2>Agent Nodes</h2>
-            <ol><li>Enroll an Agent Node from the Agents library or attach an existing library record to a compatible entity.</li><li>Open the Agent to inspect heartbeat status, enrollment data and available commands.</li><li>Dispatch a declared command. High-risk commands wait for explicit approval before execution.</li><li>Use the card remove action to detach an Agent from one entity.</li></ol>
-            <p>The Delete action inside the Agent removes it globally, clears every assignment and deny-lists its certificate identity. This does not uninstall files from the remote server; use Sindri for remote uninstall.</p>
-            <div class="documentation-note">A revoked certificate cannot return through variable or certificate rotation. Revocation is checked against the persistent Agent identity and deny-list history.</div>
-          </article>
           <article id="docs-pods" data-doc-title="Pods create unlock VLESS tabs required update channel revoke portable">
             <h2>Pods</h2>
             <h3>Configure A Subject</h3>
@@ -308,13 +285,14 @@
           </article>
           <article id="docs-settings" data-doc-title="Settings appearance colors security password logger">
             <h2>Settings</h2>
-            <ul><li><strong>Appearance:</strong> previews and saves the accent, Sidebar behavior and layout on the server.</li><li><strong>Security:</strong> rotates the exact Access Key after validating the current key and revokes other sessions.</li><li><strong>Backup:</strong> creates a complete ZIP or imports a previously created system snapshot.</li><li><strong>Updates:</strong> checks Perimetr and Updater separately, saves a recovery ZIP and follows the same durable operation after reconnecting.</li><li><strong>Logger:</strong> shows bounded, redacted event pages and exports diagnostic ZIPs.</li></ul>
+            <ul><li><strong>Appearance:</strong> preview an accent with at least 4.5:1 contrast against black. Apply color saves it; Reset color previews the baseline blue. Leaving Settings without applying restores the saved accent.</li><li><strong>Security:</strong> Change Access Key validates the current key and revokes other sessions. Commit a Kernel origin with Enter or by leaving the field; an invalid or unreachable replacement retains the previous endpoint. Change secure Kernel access token opens empty secret fields.</li><li><strong>Backup:</strong> Create and download snapshot exports a complete ZIP. Browse local snapshot archive opens the validation and restore overlay.</li><li><strong>Updates:</strong> Check for updates targets Perimetr; Check Updater for updates targets the shared helper. Application installation requires a saved recovery ZIP. Closing a running operation does not cancel it.</li><li><strong>Logs:</strong> a bounded stream shows TYPE, BODY and local TIME. Download archived logs exports retained redacted events; Load older events extends the current view.</li></ul>
+            <p>Collection pages keep Search, the filtered count and Add actions together above the list. Search ignores surrounding spaces and letter case; Clear search or Escape restores the full collection. Documentation search also matches article text. Its navigation and article scroll independently, and the current section follows the reading position.</p>
             <p>Changing the Kernel URL or write-only service token validates the connection first. Afterwards run <code>sudo perimetr-install sync-kernel</code> on the host before updating. Color changes also apply to the login page. Reset Correlation colors independently when the graph should return to the current global light and accent colors.</p>
           </article>
-          <article id="docs-backup" data-doc-title="Backup restore recovery zip agents pods denylist">
+          <article id="docs-backup" data-doc-title="Backup restore recovery zip pods denylist">
             <h2>Backup And Restore</h2>
-            <h3>Create</h3><p>Select <code>Create Backup</code>. The current snapshot downloads immediately and includes entities, images, shared Properties, correlation state, Agent identity and heartbeat data, Pod credentials and deny-lists, settings and audit records. Runtime files and deployment credentials are excluded.</p>
-            <h3>Restore</h3><ol><li>Start an empty or replacement Perimetr node.</li><li>Keep the same public endpoint whenever existing Agents and Pods must reconnect.</li><li>Select <code>Import Backup</code> and choose the ZIP. Review the preflight and explicitly confirm replacement; this revokes existing sessions.</li><li>Sign in with the restored Access Key, then confirm that Agent heartbeat and Pod status recover after import.</li></ol>
+            <h3>Create</h3><p>Select <code>Create and download snapshot</code>. The current snapshot downloads immediately and includes entities, images, shared Properties, correlation state, Pod credentials and deny-lists, settings and audit records. Runtime files and deployment credentials are excluded.</p>
+            <h3>Restore</h3><ol><li>Start an empty or replacement Perimetr node.</li><li>Keep the same public endpoint whenever existing Pods must reconnect.</li><li>Select <code>Browse local snapshot archive</code> and choose the ZIP. Review the preflight and explicitly confirm replacement; this revokes existing sessions.</li><li>Sign in with the restored Access Key, then confirm that Pod status recover after import.</li></ol>
             <div class="documentation-note">Full ZIPs encrypt logical rows. Escrow PERIMETR_POD_SIGNING_SECRET separately: recovery cannot decrypt the archive without it. Restore replaces all authoritative data and revokes sessions. No server copy is retained.</div>
           </article>
           <article id="docs-api" data-doc-title="API REST logger audit retention download">
@@ -420,7 +398,7 @@ docker compose logs --tail=200 perimetr-api</pre>
   <div id="backupImportModalBackdrop" class="modal-backdrop top" aria-hidden="true">
     <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="backupImportModalTitle">
       <div class="modal-head">
-        <h2 id="backupImportModalTitle">Import Backup</h2>
+        <h2 id="backupImportModalTitle">Restore snapshot</h2>
         <button id="closeBackupImportModal" class="close-panel" aria-label="close">X</button>
       </div>
       <div class="form-grid">
@@ -436,52 +414,10 @@ docker compose logs --tail=200 perimetr-api</pre>
     <div class="settings-modal update-install-modal" role="dialog" aria-modal="true" aria-labelledby="updateInstallModalTitle">
       <div class="modal-head"><h2 id="updateInstallModalTitle">Updates</h2><button id="closeUpdateInstallModal" class="close-panel" aria-label="Close updates">×</button></div>
       <div class="updates-body"><dl class="update-metadata"><dt>Installed</dt><dd id="updateInstalled">Checking…</dd><dt>Updater</dt><dd id="updateHelper">Checking…</dd><dt>Registry</dt><dd id="updateRegistry">Checking…</dd></dl>
-      <section class="update-discovery"><h3 id="discoveryTitle">Discovery</h3><p id="discoveryText" aria-live="polite">Checking for updates…</p><a id="releaseNotes" href="#" target="_blank" rel="noreferrer" hidden>Release notes</a></section>
+      <section class="update-discovery"><h3 id="discoveryTitle">Discovery</h3><p id="discoveryText" aria-live="polite">Checking for updates…</p><p id="discoveryDetail"></p><a id="releaseNotes" href="#" target="_blank" rel="noreferrer" hidden>Release notes</a></section>
       <div id="updateWarning" class="update-warning" hidden><h3>Save your recovery copy</h3><p>Before installation, save the full ZIP to your device. Keep it and the separately escrowed recovery secret. A later rollback requires this exact ZIP.</p><button id="saveUpdateBackup">Save backup ZIP</button><label class="check" id="savedAcknowledgement" hidden><input id="operatorSaved" type="checkbox" /> I have saved the downloaded ZIP on my device.</label><p id="saveBackupStatus" class="hint" aria-live="polite"></p></div>
       <div id="updateProgress" class="update-progress" role="progressbar" aria-label="Update progress" hidden><span></span></div>
       <p id="updateJobMessage" aria-live="polite"></p><div class="actions update-actions"><button id="checkUpdatesAgain">Check again</button><button id="installHelperUpdate" hidden>Update Updater</button><button id="installUpdate" hidden>Prepare update</button><button id="confirmInstallUpdate" disabled hidden>Install update</button><button id="reconnectUpdate" hidden>Reconnect</button><label id="rollbackLabel" hidden>Original recovery ZIP<input id="rollbackFile" type="file" accept=".zip,application/zip" /></label><button id="rollbackUpdate" hidden>Roll back</button></div></div>
-    </div>
-  </div>
-  <div id="agentLibraryModalBackdrop" class="modal-backdrop top" aria-hidden="true">
-    <div class="settings-modal agent-modal" role="dialog" aria-modal="true" aria-labelledby="agentLibraryModalTitle">
-      <div class="modal-head">
-        <h2 id="agentLibraryModalTitle">Agent Library</h2>
-        <button id="closeAgentLibraryModal" class="close-panel" aria-label="close">X</button>
-      </div>
-      <div class="setting-group">
-        <h3>Available Agent Nodes</h3>
-        <p class="hint">Agent Nodes already used somewhere in Perimetr can be attached to the currently opened block.</p>
-        <label>search<input id="agentLibrarySearch" placeholder="name, status or agent id" /></label>
-        <div id="agentLibraryList" class="agent-node-list"></div>
-      </div>
-      <div class="setting-group">
-        <h3>Register New Agent Node</h3>
-        <p class="hint">Enter the values printed by <code>agent-node registration</code>. Perimetr completes the enrollment handshake, verifies the identity fingerprint and attaches the Agent to the current block.</p>
-        <div class="form-grid">
-          <label>display name<input id="agentEnrollName" placeholder="Production Server" /></label>
-          <label>agent id<input id="agentEnrollId" placeholder="uuid from agent" /></label>
-          <label>domain<input id="agentEnrollDomain" placeholder="node.example.net" /></label>
-          <label>port<input id="agentEnrollPort" type="number" value="7443" min="1024" max="65535" /></label>
-          <label class="full">identity fingerprint<input id="agentEnrollFingerprint" placeholder="SHA256:..." /></label>
-          <label class="full">enrollment token<input id="agentEnrollToken" type="password" autocomplete="off" placeholder="token printed by agent-node registration" /></label>
-        </div>
-        <div class="actions">
-          <button id="registerAgentNode" class="primary">Register Agent Node</button>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div id="agentRemoveModalBackdrop" class="modal-backdrop top" aria-hidden="true">
-    <div class="settings-modal agent-modal" role="dialog" aria-modal="true" aria-labelledby="agentRemoveModalTitle">
-      <div class="modal-head">
-        <h2 id="agentRemoveModalTitle">Remove Agent Node</h2>
-        <button id="closeAgentRemoveModal" class="close-panel" aria-label="close">X</button>
-      </div>
-      <p class="hint">Permanently delete this Agent Node from Perimetr and remove it from every entity? The Agent Node and Sindri will remain installed on the server, but this identity will be blocked from reconnecting.</p>
-      <div class="actions">
-        <button id="confirmRemoveAgentNode" class="danger">Remove</button>
-        <button id="cancelRemoveAgentNode">Cancel</button>
-      </div>
     </div>
   </div>
   <div id="entityDeleteModalBackdrop" class="modal-backdrop top" aria-hidden="true">
@@ -494,33 +430,6 @@ docker compose logs --tail=200 perimetr-api</pre>
       <div class="actions">
         <button id="confirmEntityDelete" class="danger">Delete</button>
         <button id="cancelEntityDelete">Cancel</button>
-      </div>
-    </div>
-  </div>
-  <div id="agentApprovalModalBackdrop" class="modal-backdrop top" aria-hidden="true">
-    <div class="settings-modal agent-modal" role="dialog" aria-modal="true" aria-labelledby="agentApprovalModalTitle">
-      <div class="modal-head">
-        <h2 id="agentApprovalModalTitle">Approval Required</h2>
-        <button id="closeAgentApprovalModal" class="close-panel" aria-label="close">X</button>
-      </div>
-      <div id="agentApprovalBody" class="stack"></div>
-      <div class="actions">
-        <button id="approveAgentJob" class="primary">Yes</button>
-        <button id="rejectAgentJob" class="danger">No</button>
-      </div>
-    </div>
-  </div>
-  <div id="agentCapabilityInputModalBackdrop" class="modal-backdrop top" aria-hidden="true">
-    <div class="settings-modal agent-modal" role="dialog" aria-modal="true" aria-labelledby="agentCapabilityInputModalTitle">
-      <div class="modal-head">
-        <h2 id="agentCapabilityInputModalTitle">Command Inputs</h2>
-        <button id="closeAgentCapabilityInputModal" class="close-panel" aria-label="close">X</button>
-      </div>
-      <p id="agentCapabilityInputDescription" class="hint"></p>
-      <div id="agentCapabilityInputFields" class="form-grid"></div>
-      <div class="actions">
-        <button id="confirmAgentCapabilityInput" class="primary">Run Command</button>
-        <button id="cancelAgentCapabilityInput">Cancel</button>
       </div>
     </div>
   </div>

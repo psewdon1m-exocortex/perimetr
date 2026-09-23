@@ -7,18 +7,13 @@ import json
 import base64
 import time
 import shutil
-from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
-from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
-from sqlalchemy import select
 from sqlalchemy.orm import close_all_sessions
 
 
@@ -31,14 +26,10 @@ os.environ["PERIMETR_SESSION_TTL_SEC"] = "3600"
 os.environ["PERIMETR_POD_BUNDLE_SOURCE"] = "/tmp/perimetr-pod-test-bundle"
 
 from app.api_service.app import create_app  # noqa: E402
-from app.api_service import app as api_app_module  # noqa: E402
-from app.database import Base, engine  # noqa: E402
-from app.database import SessionLocal  # noqa: E402
-from app.models import SystemSetting  # noqa: E402
-from app.security import LoginRateLimiter, is_password_hash  # noqa: E402
-from app.services import now_utc, visible_agent_status  # noqa: E402
+from app.database import engine
+from app.security import LoginRateLimiter
+from app.services import now_utc
 from app.pod_service import heartbeat_signing_bytes  # noqa: E402
-from app.agent_request_security import signing_bytes as agent_request_signing_bytes  # noqa: E402
 from app.logs_service.service import trim_log_directory, trim_log_file  # noqa: E402
 
 
@@ -48,7 +39,8 @@ def setup_module() -> None:
     shutil.rmtree(TEST_POD_CACHE_PATH, ignore_errors=True)
     TEST_POD_BUNDLE_PATH.mkdir(parents=True, exist_ok=True)
     (TEST_POD_BUNDLE_PATH / "pod.exe").write_bytes(b"MZ-test-portable-pod")
-    Base.metadata.create_all(bind=engine)
+    from app.database_migrations import upgrade_database
+    upgrade_database(os.environ["PERIMETR_DATABASE_URL"])
 
 
 def teardown_module() -> None:
@@ -72,7 +64,6 @@ def login(client: TestClient) -> None:
     assert "session_key" not in response.json()
 
 
-
 def snapshot_member(archive, name):
     from app.pod_service import _fernet
     from app.settings import get_settings
@@ -89,54 +80,6 @@ def restore_archive(client, data):
     return response
 
 
-def agent_test_identity(agent_id: str) -> tuple[ec.EllipticCurvePrivateKey, str, str]:
-    private_key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(timezone.utc)
-    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, agent_id)])
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(private_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(minutes=1))
-        .not_valid_after(now + timedelta(days=30))
-        .sign(private_key, hashes.SHA256())
-    )
-    certificate_pem = certificate.public_bytes(serialization.Encoding.PEM).decode("utf-8")
-    fingerprint = "SHA256:" + certificate.fingerprint(hashes.SHA256()).hex().upper()
-    return private_key, certificate_pem, fingerprint
-
-
-def signed_agent_request(
-    private_key: ec.EllipticCurvePrivateKey,
-    fingerprint: str,
-    path: str,
-    payload: dict,
-) -> tuple[bytes, dict[str, str]]:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    timestamp = str(int(time.time()))
-    nonce = base64.urlsafe_b64encode(os.urandom(18)).rstrip(b"=").decode("ascii")
-    signature = private_key.sign(
-        agent_request_signing_bytes(
-            method="POST",
-            target=path,
-            timestamp=timestamp,
-            nonce=nonce,
-            body=body,
-        ),
-        ec.ECDSA(hashes.SHA256()),
-    )
-    return body, {
-        "Content-Type": "application/json",
-        "X-Agent-Fingerprint": fingerprint,
-        "X-Agent-Signature-Version": "1",
-        "X-Agent-Timestamp": timestamp,
-        "X-Agent-Nonce": nonce,
-        "X-Agent-Signature": base64.b64encode(signature).decode("ascii"),
-    }
-
-
 def test_direct_login_and_core_shell() -> None:
     with TestClient(create_app()) as client:
         assert client.get('/robots.txt').text == 'User-agent: *\nDisallow: /\n'
@@ -150,7 +93,7 @@ def test_direct_login_and_core_shell() -> None:
         assert client.get('/v1/health', headers={'X-Forwarded-For': '203.0.113.10'}).status_code == 404
         login(client)
         shell = client.get('/')
-        for feature in ['Dashboard', 'Overview', 'Correlation Map', 'Documentation', 'Appearance', 'Security', 'Backup', 'Updates', 'Logs', 'Agent Library', 'Create Pod', 'Approval Required']:
+        for feature in ['Dashboard', 'Overview', 'Correlation Map', 'Documentation', 'Appearance', 'Security', 'Backup', 'Updates', 'Logs', 'Create Pod']:
             assert feature in shell.text
         assert client.get('/assets/core.js').status_code == 200
         assert client.get('/assets/operator.js').status_code == 200
@@ -172,15 +115,6 @@ def test_direct_login_rate_limit_and_password_rotation() -> None:
             assert changed.status_code == 200
             client.headers['X-CSRF-Token'] = changed.json()['csrf_token']
             assert client.get('/v1/settings/runtime').status_code == 200
-
-
-def test_stale_online_agent_is_reported_offline() -> None:
-    agent = SimpleNamespace(
-        enrollment_state="enrolled",
-        status="ONLINE",
-        last_heartbeat_at=now_utc() - timedelta(seconds=91),
-    )
-    assert visible_agent_status(agent) == "OFFLINE"
 
 
 def test_correlation_state_and_percentage() -> None:
@@ -595,47 +529,6 @@ def test_pod_provisioning_identity_heartbeat_clone_and_revoke() -> None:
             assert b"designer-decoy-password" not in archive.content
 
 
-def test_agent_command_queue_still_available() -> None:
-    with TestClient(create_app()) as client:
-        denied = client.post(
-            "/v1/agents/register",
-            json={
-                "name": "Untrusted Agent",
-                "agent_type": "agent",
-                "host_id": "untrusted-agent",
-                "api_base_url": "http://agent.invalid",
-                "identity_fingerprint": "untrusted-fingerprint",
-                "capabilities": [],
-            },
-        )
-        assert denied.status_code == 403
-        login(client)
-
-        register = client.post(
-            "/v1/agents/register",
-            json={
-                "name": "Core Agent",
-                "agent_type": "agent",
-                "host_id": "core-agent",
-                "api_base_url": "http://agent.local",
-                "identity_fingerprint": "fingerprint",
-                "capabilities": ["status", "logs"],
-            },
-        )
-        assert register.status_code == 201
-        agent_id = register.json()["id"]
-
-        command = client.post(
-            f"/v1/agents/{agent_id}/commands",
-            json={"command": "status", "target": {"service": "perimetr"}, "params": {}},
-        )
-        assert command.status_code == 201
-
-        pending = client.get(f"/v1/agents/{agent_id}/commands/pending")
-        assert pending.status_code == 200
-        assert [item["id"] for item in pending.json()] == [command.json()["id"]]
-
-
 def test_entity_deletion_and_snapshot_id_compatibility() -> None:
     with TestClient(create_app()) as client:
         login(client)
@@ -668,544 +561,6 @@ def test_entity_deletion_and_snapshot_id_compatibility() -> None:
         assert subject_deleted.status_code == 200
         assert subject_deleted.json() == {"deleted": True, "id": public_id}
         assert client.get(f"/v1/subjects/{public_id}").status_code == 404
-
-
-def test_agent_control_plane_registry_assignments_jobs_and_backup() -> None:
-    with TestClient(create_app()) as client:
-        login(client)
-
-        enrolled = client.post(
-            "/api/agents/enroll",
-            json={
-                "agent_id": "73b93a46-82c4-4f41-b919-9b89b0f48e42",
-                "display_name": "Production Server",
-                "domain": "node.example.net",
-                "port": 7443,
-                "identity_fingerprint": "SHA256:AB4219",
-                "identity_certificate": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
-                "certificate_serial": "1001",
-                "agent_version": "1.0.0",
-                "sindri_version": "1.0.0",
-                "sindri_protocol_version": "1",
-                "capabilities": [
-                    {"action": "system.info", "title": "System info", "group": "System", "risk": "read", "inputs": []},
-                    {"action": "system.reboot", "title": "Reboot", "group": "System", "risk": "dangerous", "inputs": []},
-                ],
-            },
-        )
-        assert enrolled.status_code == 201
-        agent_id = enrolled.json()["id"]
-        assert enrolled.json()["assignment_count"] == 0
-
-        library_empty = client.get("/api/agents/library")
-        assert library_empty.status_code == 200
-        assert any(item["id"] == agent_id for item in library_empty.json())
-
-        assigned = client.post(
-            "/api/blocks/laboratory/agents?block_type=laboratory",
-            json={"agent_id": agent_id, "created_by": "operator"},
-        )
-        assert assigned.status_code == 201
-        assert assigned.json()["agent"]["display_name"] == "Production Server"
-        linked_agent = next(item for item in client.get("/api/agents/library").json() if item["id"] == agent_id)
-        assert linked_agent["assignments"] == [{"block_type": "laboratory", "block_id": "laboratory", "name": "Laboratory"}]
-
-        duplicate_limit = client.post(
-            "/api/agents/enroll",
-            json={
-                "agent_id": "83b93a46-82c4-4f41-b919-9b89b0f48e43",
-                "display_name": "Second Server",
-                "domain": "node2.example.net",
-                "port": 7444,
-                "identity_fingerprint": "SHA256:SECOND",
-            },
-        )
-        assert duplicate_limit.status_code == 201
-        second_agent_id = duplicate_limit.json()["id"]
-        blocked = client.post(
-            "/api/blocks/laboratory/agents?block_type=laboratory",
-            json={"agent_id": second_agent_id, "created_by": "operator"},
-        )
-        assert blocked.status_code == 409
-        assert blocked.json()["error"]["message"] == "AGENT_LIMIT_REACHED"
-
-        library = client.get("/api/agents/library")
-        assert library.status_code == 200
-        assert any(item["id"] == agent_id for item in library.json())
-        assert any(item["id"] == second_agent_id for item in library.json())
-        reversed_library_ids = [item["id"] for item in reversed(library.json())]
-        reordered_library = client.post("/api/agents/reorder", json={"ordered_agent_ids": reversed_library_ids})
-        assert reordered_library.status_code == 200
-        assert [item["id"] for item in client.get("/api/agents/library").json()] == reversed_library_ids
-
-        heartbeat = client.post(
-            f"/api/agents/{agent_id}/heartbeat",
-            json={
-                "protocol_version": "1",
-                "agent_id": agent_id,
-                "timestamp": "2026-07-10T18:30:00Z",
-                "sequence": 1,
-                "status": "healthy",
-                "agent_version": "1.0.0",
-                "sindri_version": "1.0.0",
-                "sindri_protocol_version": "1",
-                "hostname": "node-01",
-                "boot_id": "boot-1",
-                "queue_length": 0,
-                "resources": {"cpu_load_1m": 0.2},
-                "listener": {"port": 7443, "status": "listening"},
-            },
-        )
-        assert heartbeat.status_code == 200
-        assert heartbeat.json()["status"] == "ONLINE"
-
-        job = client.post(
-            f"/api/agents/{agent_id}/jobs",
-            json={"action": "system.reboot", "inputs": {}, "created_by": "operator"},
-        )
-        assert job.status_code == 201
-        job_id = job.json()["job_id"]
-        assert "test" not in job.request.content.decode()
-
-        approval_event = client.post(
-            f"/api/agents/{agent_id}/jobs/{job_id}/events",
-            json={
-                "type": "job.approval_required",
-                "status": "approval_required",
-                "approval": {
-                    "approval_id": "approval-1",
-                    "plan_hash": "sha256:plan",
-                    "risk": "dangerous",
-                    "warning": "The server will reboot.",
-                    "plan": [{"id": "reboot", "name": "Request system reboot"}],
-                    "expires_at": "2026-07-10T19:00:00Z",
-                },
-            },
-        )
-        assert approval_event.status_code == 200
-
-        approvals = client.get(f"/api/agents/{agent_id}/approvals")
-        assert approvals.status_code == 200
-        assert approvals.json()[0]["approval_id"] == "approval-1"
-
-        approved = client.post(
-            f"/api/agents/{agent_id}/jobs/{job_id}/approve",
-            json={"approval_id": "approval-1", "plan_hash": "sha256:plan", "decided_by": "operator"},
-        )
-        assert approved.status_code == 200
-        assert approved.json()["decision"] == "approved"
-
-        events = client.get(f"/api/agents/{agent_id}/jobs/{job_id}/events")
-        assert events.status_code == 200
-        assert [item["sequence"] for item in events.json()] == sorted(item["sequence"] for item in events.json())
-        assert any(item["event_type"] == "job.approved" for item in events.json())
-
-        removed = client.delete(f"/api/blocks/laboratory/agents/{agent_id}?block_type=laboratory")
-        assert removed.status_code == 200
-        assert removed.json() == {"removed": True, "revoke_sent": False}
-
-        library_after_remove = client.get("/api/agents/library")
-        assert library_after_remove.status_code == 200
-        assert any(item["id"] == agent_id for item in library_after_remove.json())
-
-        detached = client.get(f"/api/agents/{agent_id}")
-        assert detached.status_code == 200
-        assert detached.json()["status"] == "DETACHED"
-
-        backup = client.post("/v1/backups", json={"entity_type": "system"})
-        assert backup.status_code == 200
-        archive = backup
-        assert archive.status_code == 200
-        archive_path = Path(__file__).parent / "test-agent-backup.zip"
-        archive_path.write_bytes(archive.content)
-        try:
-            with ZipFile(archive_path) as bundle:
-                assert "data/agent_assignments.jsonl" in bundle.namelist()
-                assert "data/jobs.jsonl" in bundle.namelist()
-                assert "data/job_events.jsonl" in bundle.namelist()
-                assert "data/approval_requests.jsonl" in bundle.namelist()
-        finally:
-            if archive_path.exists():
-                archive_path.unlink()
-
-
-def test_remote_agent_enrollment_dispatch_and_approval_are_forwarded(monkeypatch) -> None:
-    agent_id = "remote-agent-dispatch-1"
-    private_key, certificate_pem, fingerprint = agent_test_identity(agent_id)
-    calls: dict[str, list[dict]] = {"enroll": [], "dispatch": [], "decision": []}
-
-    def fake_enroll(**kwargs):
-        calls["enroll"].append(kwargs)
-        now = now_utc()
-        return {
-            "status": "enrolled",
-            "agent_id": agent_id,
-            "identity_certificate_pem": certificate_pem,
-            "fingerprint_sha256": fingerprint,
-            "request_auth": "ecdsa-p256-sha256-v1",
-            "certificate_serial": "remote-serial-1",
-            "certificate_valid_not_before": now - timedelta(minutes=1),
-            "certificate_valid_not_after": now + timedelta(days=30),
-            "agent_version": "1.0.0-test",
-            "sindri_version": "1.0.0-test",
-            "sindri_protocol_version": "1",
-            "capabilities": [
-                {
-                    "action": "system.reboot",
-                    "title": "Reboot",
-                    "group": "System",
-                    "risk": "dangerous",
-                    "inputs": [],
-                    "available": True,
-                },
-                {
-                    "action": "user.password_change",
-                    "title": "Change password",
-                    "group": "Users",
-                    "risk": "change",
-                    "inputs": [
-                        {"name": "username", "type": "string", "required": True},
-                        {
-                            "name": "password",
-                            "type": "secret",
-                            "required": True,
-                            "secret": True,
-                        },
-                    ],
-                    "available": True,
-                },
-            ],
-        }
-
-    def fake_dispatch(**kwargs):
-        calls["dispatch"].append(kwargs)
-        return {"status": "accepted"}
-
-    def fake_decision(**kwargs):
-        calls["decision"].append(kwargs)
-        return {"status": "accepted"}
-
-    monkeypatch.setattr(api_app_module, "enroll_remote_agent", fake_enroll)
-    monkeypatch.setattr(api_app_module, "dispatch_remote_agent_job", fake_dispatch)
-    monkeypatch.setattr(api_app_module, "decide_remote_agent_job", fake_decision)
-
-    with TestClient(create_app()) as client:
-        login(client)
-        enrolled = client.post(
-            "/api/agents/enroll",
-            json={
-                "agent_id": agent_id,
-                "display_name": "Remote Agent",
-                "domain": "agent.remote.example",
-                "port": 7443,
-                "api_base_url": "https://agent.remote.example:7443",
-                "identity_fingerprint": fingerprint,
-                "enrollment_token": "one-time-token",
-                "capabilities": [
-                    {
-                        "action": "system.reboot",
-                        "title": "Reboot",
-                        "group": "System",
-                        "risk": "dangerous",
-                        "inputs": [],
-                    }
-                ],
-            },
-        )
-        assert enrolled.status_code == 201
-        assert calls["enroll"][0]["heartbeat_endpoint"].endswith(
-            f"/api/agents/{agent_id}/heartbeat"
-        )
-        capabilities = client.get(f"/api/agents/{agent_id}/capabilities")
-        assert capabilities.status_code == 200
-        assert {item["action"] for item in capabilities.json()["items"]} == {
-            "system.reboot",
-            "user.password_change",
-        }
-
-        heartbeat_payload = {
-            "protocol_version": "1",
-            "agent_id": agent_id,
-            "timestamp": "2026-07-27T12:00:00Z",
-            "sequence": 1,
-            "status": "healthy",
-        }
-        assert client.post(
-            f"/api/agents/{agent_id}/heartbeat",
-            json=heartbeat_payload,
-        ).status_code == 403
-        heartbeat_path = f"/api/agents/{agent_id}/heartbeat"
-        heartbeat_body, heartbeat_headers = signed_agent_request(
-            private_key, fingerprint, heartbeat_path, heartbeat_payload
-        )
-        heartbeat = client.post(
-            heartbeat_path,
-            headers=heartbeat_headers,
-            content=heartbeat_body,
-        )
-        assert heartbeat.status_code == 200
-        replayed = client.post(
-            heartbeat_path,
-            headers=heartbeat_headers,
-            content=heartbeat_body,
-        )
-        assert replayed.status_code == 403
-        assert replayed.json()["error"]["message"] == "AGENT_REQUEST_REPLAYED"
-
-        secret_job = client.post(
-            f"/api/agents/{agent_id}/jobs",
-            json={
-                "action": "user.password_change",
-                "inputs": {
-                    "username": "managed-user",
-                    "password": "very-secret-password",
-                },
-                "created_by": "operator",
-            },
-        )
-        assert secret_job.status_code == 201
-        assert secret_job.json()["inputs"]["password"] == "[redacted]"
-        assert calls["dispatch"][0]["inputs"]["password"] == "very-secret-password"
-
-        created = client.post(
-            f"/api/agents/{agent_id}/jobs",
-            json={"action": "system.reboot", "inputs": {}, "created_by": "operator"},
-        )
-        assert created.status_code == 201
-        job_id = created.json()["job_id"]
-        assert calls["dispatch"][1]["job_id"] == job_id
-        assert calls["dispatch"][1]["action"] == "system.reboot"
-
-        event_path = f"/api/agents/{agent_id}/jobs/{job_id}/events"
-        event_payload = {
-            "type": "job.approval_required",
-            "status": "approval_required",
-            "approval": {
-                "approval_id": "approval-remote-1",
-                "plan_hash": "sha256:remote-plan",
-                "risk": "dangerous",
-                "plan": [{"id": "reboot", "name": "Request system reboot"}],
-            },
-        }
-        event_body, event_headers = signed_agent_request(
-            private_key, fingerprint, event_path, event_payload
-        )
-        approval_event = client.post(
-            event_path,
-            headers=event_headers,
-            content=event_body,
-        )
-        assert approval_event.status_code == 200
-        pending = client.get("/api/approvals/pending")
-        assert pending.status_code == 200
-        current_approval = next(
-            item
-            for item in pending.json()
-            if item["approval_id"] == "approval-remote-1"
-        )
-        assert current_approval["action"] == "system.reboot"
-        assert current_approval["hostname"] == "agent.remote.example"
-        approved = client.post(
-            f"/api/agents/{agent_id}/jobs/{job_id}/approve",
-            json={
-                "approval_id": "approval-remote-1",
-                "plan_hash": "sha256:remote-plan",
-                "decided_by": "operator",
-            },
-        )
-        assert approved.status_code == 200
-        assert approved.json()["forward_to_agent"] is True
-        assert calls["decision"][0]["job_id"] == job_id
-        assert calls["decision"][0]["decision"] == "approved"
-
-
-def test_agent_subject_multi_assignment_reorder_and_perimetr_limit() -> None:
-    perimetr_block_id = "5f0b6d3d90f548a9a2f1d6e9cb7f3412"
-    with TestClient(create_app()) as client:
-        login(client)
-
-        created_object = client.post(
-            "/v1/objects",
-            json={
-                "name": "Agent Subject Workspace",
-                "kind": "workspace",
-                "description": "",
-                "tags": [],
-            },
-        )
-        assert created_object.status_code == 201
-        created_subject = client.post(
-            "/v1/subjects",
-            json={"object_id": created_object.json()["id"], "runtime_type": "web"},
-        )
-        assert created_subject.status_code == 201
-        subject_id = created_subject.json()["id"]
-
-        agent_ids = [
-            "93b93a46-82c4-4f41-b919-9b89b0f48e51",
-            "93b93a46-82c4-4f41-b919-9b89b0f48e52",
-        ]
-        for index, agent_id in enumerate(agent_ids, start=1):
-            enrolled = client.post(
-                "/api/agents/enroll",
-                json={
-                    "agent_id": agent_id,
-                    "display_name": f"Subject Agent {index}",
-                    "domain": f"subject-agent-{index}.example.net",
-                    "port": 7443 + index,
-                    "identity_fingerprint": f"SHA256:SUBJECT:{index}",
-                    "capabilities": [
-                        {"action": "system.info", "title": "System info", "group": "System", "risk": "read", "inputs": []}
-                    ],
-                },
-            )
-            assert enrolled.status_code == 201
-
-        for agent_id in agent_ids:
-            assigned = client.post(
-                f"/api/blocks/{subject_id}/agents?block_type=subject",
-                json={"agent_id": agent_id, "created_by": "operator"},
-            )
-            assert assigned.status_code == 201
-
-        subject_agents = client.get(f"/api/blocks/{subject_id}/agents?block_type=subject")
-        assert subject_agents.status_code == 200
-        assert [item["agent_id"] for item in subject_agents.json()] == agent_ids
-
-        reordered = client.post(
-            f"/api/blocks/{subject_id}/agents/reorder?block_type=subject",
-            json={"ordered_agent_ids": list(reversed(agent_ids))},
-        )
-        assert reordered.status_code == 200
-        assert reordered.json() == {"reordered": True}
-        subject_agents = client.get(f"/api/blocks/{subject_id}/agents?block_type=subject")
-        assert [item["agent_id"] for item in subject_agents.json()] == list(reversed(agent_ids))
-
-        perimetr_first = client.post(
-            f"/api/blocks/{perimetr_block_id}/agents?block_type=perimetr",
-            json={"agent_id": agent_ids[0], "created_by": "operator"},
-        )
-        assert perimetr_first.status_code == 201
-        perimetr_second = client.post(
-            f"/api/blocks/{perimetr_block_id}/agents?block_type=perimetr",
-            json={"agent_id": agent_ids[1], "created_by": "operator"},
-        )
-        assert perimetr_second.status_code == 409
-        assert perimetr_second.json()["error"]["message"] == "AGENT_LIMIT_REACHED"
-
-        removed_subject_assignment = client.delete(f"/api/blocks/{subject_id}/agents/{agent_ids[0]}?block_type=subject")
-        assert removed_subject_assignment.status_code == 200
-        library = client.get("/api/agents/library")
-        assert any(item["id"] == agent_ids[0] for item in library.json())
-
-        removed_perimetr_assignment = client.delete(
-            f"/api/blocks/{perimetr_block_id}/agents/{agent_ids[0]}?block_type=perimetr"
-        )
-        assert removed_perimetr_assignment.status_code == 200
-        library = client.get("/api/agents/library")
-        assert any(item["id"] == agent_ids[0] for item in library.json())
-
-
-def test_agent_restore_resumes_heartbeat_and_revoked_identity_cannot_rotate_back() -> None:
-    agent_id = "a3b93a46-82c4-4f41-b919-9b89b0f48e61"
-    with TestClient(create_app()) as client:
-        login(client)
-        enrollment = {
-            "agent_id": agent_id,
-            "display_name": "Restore Agent",
-            "domain": "restore-agent.example.net",
-            "port": 7443,
-            "identity_fingerprint": "SHA256:RESTORE:ORIGINAL",
-            "identity_certificate": "certificate-original",
-            "certificate_serial": "restore-1001",
-        }
-        assert client.post("/api/agents/enroll", json=enrollment).status_code == 201
-        assert client.post(
-            "/api/blocks/laboratory/agents?block_type=laboratory",
-            json={"agent_id": agent_id, "created_by": "operator"},
-        ).status_code == 201
-
-        heartbeat = {
-            "protocol_version": "1",
-            "agent_id": agent_id,
-            "timestamp": "2026-07-12T12:00:00Z",
-            "sequence": 1,
-            "status": "healthy",
-            "agent_version": "1.0.0",
-            "sindri_protocol_version": "1",
-            "hostname": "restore-agent",
-            "queue_length": 0,
-        }
-        assert client.post(f"/api/agents/{agent_id}/heartbeat", json=heartbeat).status_code == 200
-
-        backup = client.post("/v1/backups", json={"entity_type": "system"})
-        archive = backup
-        assert archive.status_code == 200
-        source_buffer = BytesIO(archive.content)
-        corrupt_buffer = BytesIO()
-        with ZipFile(source_buffer) as source, ZipFile(corrupt_buffer, "w", ZIP_DEFLATED) as corrupt:
-            for name in source.namelist():
-                corrupt.writestr(name, b"[]" if name == "data/agents.jsonl" else source.read(name))
-        rejected = restore_archive(client, corrupt_buffer.getvalue())
-        assert rejected.status_code == 400
-        archive_path = Path(__file__).parent / "test-restore-agent.zip"
-        archive_path.write_bytes(archive.content)
-        try:
-            with ZipFile(archive_path) as bundle:
-                for required in ["agent_certificates.json", "agent_endpoints.json", "agent_heartbeats.json", "agent_state_events.json", "certificate_denylist.json", "controller_identity.json"]:
-                    assert "data/" + required.removesuffix(".json") + ".jsonl" in bundle.namelist()
-        finally:
-            archive_path.unlink(missing_ok=True)
-
-        assert client.delete(f"/api/blocks/laboratory/agents/{agent_id}?block_type=laboratory").status_code == 200
-        assert client.patch(f"/api/agents/{agent_id}", json={"display_name": "Changed After Backup"}).status_code == 200
-        restored = restore_archive(client, archive.content)
-        assert restored.status_code == 200
-        assignments = client.get("/api/blocks/laboratory/agents?block_type=laboratory").json()
-        assert any(item["agent_id"] == agent_id and item["agent"]["display_name"] == "Restore Agent" for item in assignments)
-        heartbeat["sequence"] = 2
-        assert client.post(f"/api/agents/{agent_id}/heartbeat", json=heartbeat).status_code == 200
-
-        revoke = client.post(f"/api/agents/{agent_id}/revoke")
-        assert revoke.status_code == 200
-        rotated = {**enrollment, "identity_fingerprint": "SHA256:RESTORE:ROTATED", "certificate_serial": "restore-1002"}
-        assert client.post("/api/agents/enroll", json=rotated).status_code == 409
-        assert client.post(f"/api/agents/{agent_id}/heartbeat", json=heartbeat).status_code == 403
-
-
-def test_global_agent_delete_removes_assignments_and_deny_lists_identity() -> None:
-    agent_id = "b3b93a46-82c4-4f41-b919-9b89b0f48e71"
-    enrollment = {
-        "agent_id": agent_id,
-        "display_name": "Disposable Agent",
-        "domain": "disposable.example.net",
-        "port": 7443,
-        "identity_fingerprint": "SHA256:DISPOSABLE",
-        "certificate_serial": "delete-1001",
-    }
-    with TestClient(create_app()) as client:
-        login(client)
-        assert client.post("/api/agents/enroll", json=enrollment).status_code == 201
-        object_id = client.post(
-            "/v1/objects",
-            json={"name": "Agent Delete Host", "kind": "workspace", "description": "", "tags": []},
-        ).json()["id"]
-        subject_id = client.post("/v1/subjects", json={"object_id": object_id, "runtime_type": "web"}).json()["id"]
-        assert client.post(
-            f"/api/blocks/{subject_id}/agents?block_type=subject",
-            json={"agent_id": agent_id, "created_by": "operator"},
-        ).status_code == 201
-        renamed = client.patch(f"/api/agents/{agent_id}", json={"display_name": "Renamed Agent"})
-        assert renamed.status_code == 200
-        assert renamed.json()["display_name"] == "Renamed Agent"
-
-        deleted = client.delete(f"/api/agents/{agent_id}")
-        assert deleted.status_code == 200
-        assert deleted.json()["deleted"] is True
-        assert all(item["id"] != agent_id for item in client.get("/api/agents/library").json())
-        assert client.get(f"/api/agents/{agent_id}").status_code == 404
-        assert client.get(f"/api/blocks/{subject_id}/agents?block_type=subject").json() == []
-        assert client.post("/api/agents/enroll", json=enrollment).status_code == 409
 
 
 def test_logger_retention_limits_lines_age_and_total_size(tmp_path: Path) -> None:

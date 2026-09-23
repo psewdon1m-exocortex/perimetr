@@ -12,9 +12,6 @@ class RuntimeType(str, Enum):
     web = "web"
 
 
-class AgentType(str, Enum):
-    agent = "agent"
-    module = "module"
 
 
 class LaunchDecision(str, Enum):
@@ -27,11 +24,3 @@ class SessionStatus(str, Enum):
     active = "active"
     expired = "expired"
     revoked = "revoked"
-
-
-class CommandStatus(str, Enum):
-    accepted = "accepted"
-    rejected = "rejected"
-    running = "running"
-    succeeded = "succeeded"
-    failed = "failed"

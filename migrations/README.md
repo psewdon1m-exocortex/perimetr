@@ -74,6 +74,20 @@ separate salted decoy-password hash. The change is additive and contains no
 plaintext credential migration. Downgrade removes only the two new columns, so
 the `0004` image can read a database downgraded from `0005`.
 
+## Revision 0007: remove server Agent Node management
+
+Deletes the server-agent registry, command/job/approval data, controller signing
+identity and dependent tables. Agent-bound sessions are deleted and the nullable
+identity column is removed. Retained domain tables and the audit history are not
+deleted. Saved navigation loses only the retired Agents entry.
+
+This is forward-only: save the old database and matching image before upgrading.
+Rollback requires that pair. Current snapshots use v4 / revision 0007; import old
+v3 snapshots with the old image in isolation, then migrate and re-export.
+Migration 0007 never sends network requests or uninstalls remote software.
+Historical migrations keep their original agent schema so existing installations
+can upgrade through the same version chain.
+
 ## Revision 0006: single-operator Access Key
 
 Preserves an existing salted verifier, removes the obsolete username/auth fields,

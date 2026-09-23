@@ -6,11 +6,20 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
-from .database import Base, _connect_args, _normalize_database_url
-from . import models  # noqa: F401
+from .database import _connect_args, _normalize_database_url
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Frozen pre-Alembic baseline, independent of the current (smaller) model.
+LEGACY_BASELINE_TABLES = {
+    "objects", "subjects", "access_policies", "system_settings", "pods",
+    "pod_provisioning_records", "pod_denylist", "agents", "agent_assignments",
+    "agent_endpoints", "agent_certificates", "agent_capabilities", "agent_heartbeats",
+    "agent_state_events", "jobs", "job_events", "job_results", "approval_requests",
+    "approval_decisions", "revocation_records", "certificate_denylist",
+    "controller_identity", "launch_authorizations", "agent_commands", "audit_events",
+    "session_leases", "backup_manifests",
+}
 
 
 def alembic_config(database_url: str) -> Config:
@@ -46,8 +55,7 @@ def upgrade_database(database_url: str) -> None:
                 config.attributes["connection"] = connection
                 tables = set(inspect(connection).get_table_names())
                 if tables and "alembic_version" not in tables:
-                    expected_tables = set(Base.metadata.tables)
-                    missing_tables = sorted(expected_tables - tables)
+                    missing_tables = sorted(LEGACY_BASELINE_TABLES - tables)
                     if missing_tables:
                         raise RuntimeError(
                             "Existing unversioned Perimetr database predates the "

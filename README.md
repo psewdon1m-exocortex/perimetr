@@ -1,7 +1,7 @@
 # Perimetr
 
 Perimetr owns Objects, Subjects, shared Properties and correlations, Pod identities,
-Agent Node assignments, jobs, approvals and the controller identity. The API uses
+access policies, settings and audit history. The API uses
 FastAPI, SQLAlchemy and Alembic; production state is PostgreSQL. The browser shell
 is served locally with no third-party assets.
 
@@ -24,6 +24,11 @@ in recovery. Alt+Up/Down reorders focused items; pointer dragging remains availa
 Old browser presentation is imported once. Existing browser-only domain state is
 retained for inspection, never silently deleted or merged into server data.
 
+The shared shell and components follow the measured Part 01 templates; see
+[interface mapping and verification](docs/interface.md). Collection search,
+counts and Add actions remain together in a sticky bar. Documentation has two
+independent scroll regions and keeps its current section synchronized while reading.
+
 Access Key rotation requires the current key, rotates the current session's CSRF
 credential and revokes other direct sessions. Logout revokes the server session.
 Kernel URL is database-owned. A replacement Kernel service token is checked before
@@ -40,9 +45,9 @@ cancel installation. Rollback requires the original saved ZIP.
 ## Recovery and logs
 
 [Recovery procedure](docs/recovery.md) describes full replacement, external key
-escrow, old-version migration and rollback. ZIP v3 encrypts every logical row and
-includes all 25 authoritative tables: relationships, access policies, controller
-identity, Pod configuration, deny-lists, settings/verifier and audit records.
+escrow, old-version migration and rollback. ZIP v4 encrypts every logical row and
+includes all 9 authoritative tables: relationships, access policies,
+Pod configuration, deny-lists, settings/verifier and audit records.
 Live leases, backup history, caches and deployment credentials are excluded.
 No backup ZIP is retained on the server. Restore validates the entire archive
 before replacement and revokes old sessions and launch authorizations.
@@ -93,8 +98,13 @@ Register resolves typed Volt references for Perimetr/Pod repositories, public
 Perimetr SNI/port and refresh interval. The public address never changes Uvicorn's
 local listener. Preserve it during recovery so enrolled devices can reconnect.
 Pod runtime downloads retain signature, checksum, version and identity pinning;
-[Pod factory runtime](pod-runtime/README.md) and [Agent connector](agent-connector.md)
-describe their separate contracts.
+[Pod factory runtime](pod-runtime/README.md) describes the device contract.
+
+Server Agent Node management has been removed: no registry, enrollment, server
+commands, approvals, callbacks or controller signing identity remain in the
+application. Migration `0007` removes their tables without contacting remote
+servers. Pods and the scoped host Updater integration remain available. See
+[migration and recovery](docs/recovery.md) before upgrading an existing database.
 
 ## Verification and release
 

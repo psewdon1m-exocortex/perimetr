@@ -1,5 +1,5 @@
 
-    const state = { objects: [], subjects: [], pods: [], agents: [], overviewBlocks: [], audit: [], logs: [], metrics: null, backups: [], runtime: null, neptune: null, neptuneRelease: null, updateCheck: null, updaterRuntime: null, updateJob: null, pendingUpdateVersion: "", updateInstallPending: false, correlationPercentage: 0 };
+    const state = { objects: [], subjects: [], pods: [], overviewBlocks: [], audit: [], logs: [], metrics: null, backups: [], runtime: null, neptune: null, neptuneRelease: null, updateCheck: null, updaterRuntime: null, updateJob: null, pendingUpdateVersion: "", updateInstallPending: false, correlationPercentage: 0 };
     const uiState = {
       descriptionsByBlock: {},
       propertiesByBlock: {},
@@ -33,35 +33,12 @@
       pointerX: 0, pointerY: 0, frame: 0, initialized: false,
     };
     let correlationSyncTimer = null;
-    const PERIMETR_BLOCK_ID = "5f0b6d3d90f548a9a2f1d6e9cb7f3412";
     const OVERVIEW_BLOCK_DEFAULTS = {
       human_general: { name: "I as human in general", localBlockId: "human_general" },
       turkey_global: { name: "Turkey / Global sphere", localBlockId: "turkey_global" },
       russia_sphere: { name: "Russia influence sphere", localBlockId: "russia_sphere" },
-      laboratory_block: { name: "Laboratory", localBlockId: "laboratory_block", blockType: "laboratory", backendBlockId: "laboratory" },
-      perimetr_block: { name: "Perimetr", localBlockId: "perimetr_block", blockType: "perimetr", backendBlockId: PERIMETR_BLOCK_ID },
-    };
-    const agentUiState = {
-      activeBlockType: "",
-      activeBlockId: "",
-      activeBlockTitle: "",
-      activeAgentId: "",
-      activeJobId: "",
-      activeApproval: null,
-      pendingCapability: null,
-      pendingRemoveAgentId: "",
-      viewingAgent: false,
-      returnContext: null,
-      libraryOnly: false,
-      draggedAgentIndex: null,
-      draggedLibraryAgentIndex: null,
-      assignments: [],
-      library: [],
-      capabilities: [],
-      jobs: [],
-      events: [],
-      approvals: [],
-      presentedApprovalIds: new Set(),
+      laboratory_block: { name: "Laboratory", localBlockId: "laboratory_block" },
+      perimetr_block: { name: "Perimetr", localBlockId: "perimetr_block" },
     };
     const subjectPodState = { subjectId: "", config: null, provisioning: [], instances: [], selected: null };
     const modalDrag = { modal: null, offsetX: 0, offsetY: 0 };
@@ -145,7 +122,7 @@
       const days = Math.floor(total / 86400);
       const hours = Math.floor((total % 86400) / 3600);
       const minutes = Math.floor((total % 3600) / 60);
-      return days > 0 ? `${days}d ${hours}h ${minutes}m` : `${hours}h ${minutes}m`;
+      return days > 0 ? `${days}d ${hours}h ${minutes}m ${total % 60}s` : `${hours}h ${minutes}m ${total % 60}s`;
     }
     function statusClass(status) {
       const normalized = String(status || "").toLowerCase();
@@ -175,7 +152,7 @@
       }
     }
     function modalElementFromBackdrop(backdropId) {
-      return el(backdropId)?.querySelector(".property-modal, .settings-modal, .agent-modal");
+      return el(backdropId)?.querySelector(".property-modal, .settings-modal");
     }
     function resetModalPosition(backdropId) {
       const modal = modalElementFromBackdrop(backdropId);
@@ -319,6 +296,9 @@
       const visibleNodes = data.nodes.slice(0, 500);
       const visibleIds = new Set(visibleNodes.map(item => item.id));
       const visibleLinks = data.links.filter(link => visibleIds.has(link.sourceId) && visibleIds.has(link.targetId)).slice(0, 2000);
+      const nodeLabels = new Map(data.nodes.map(node => [node.id, node.label]));
+      const relationshipRows = data.links.slice(0, 500);
+      el("graphRelationshipList").innerHTML = `<p class="hint">Showing ${relationshipRows.length} of ${data.links.length} relationships.</p><ul>${relationshipRows.map(link => `<li>Property: ${esc(nodeLabels.get(link.sourceId) || link.sourceId)} — Entity: ${esc(nodeLabels.get(link.targetId) || link.targetId)}</li>`).join("")}</ul>`;
       el("graphLimitHint").textContent = data.nodes.length > 500 || data.links.length > 2000 ? `Showing ${visibleNodes.length} of ${data.nodes.length} nodes and ${visibleLinks.length} of ${data.links.length} links. Saved data and the correlation score remain complete.` : "";
       graphState.nodes = visibleNodes.map((item, index) => {
         const saved = previous.get(item.id);
@@ -581,17 +561,22 @@
     }
     function renderMetrics() {
       const metrics = state.metrics || {};
-      el("cpuCores").textContent = `Host CPU · ${metrics.cpu_cores ?? "unknown"} logical cores`;
-      el("cpuPercent").textContent = `${metrics.cpu_percent ?? "—"}%`;
-      el("ramUsed").textContent = fmtBytes(metrics.ram_used_bytes);
-      el("ramTotal").textContent = fmtBytes(metrics.ram_total_bytes);
-      el("ramPercent").textContent = `${metrics.ram_percent ?? "—"}%`;
-      el("diskUsed").textContent = fmtBytes(metrics.disk_used_bytes);
-      el("diskTotal").textContent = fmtBytes(metrics.disk_total_bytes);
-      el("diskPercent").textContent = `${metrics.disk_percent ?? "—"}%`;
-      el("systemUptime").textContent = fmtUptime(metrics.uptime_seconds);
+      for (const kind of ["cpu", "ram", "disk"]) {
+        const value = metrics[`${kind}_percent`], known = Number.isFinite(value);
+        el(`${kind}Percent`).textContent = known ? `${value.toFixed(1)}%` : "Unavailable";
+        const progress = el(`${kind}Progress`); progress.hidden = !known;
+        if (known) { const clamped = Math.max(0, Math.min(100, value)); progress.setAttribute("aria-valuenow", clamped); progress.firstElementChild.style.width = `${clamped}%`; }
+        else progress.removeAttribute("aria-valuenow");
+      }
+      el("cpuCores").textContent = `-  cores: ${metrics.cpu_cores ?? "unknown"}`;
+      for (const kind of ["ram", "disk"]) {
+        el(`${kind}Used`).textContent = metrics[`${kind}_used_bytes`] == null ? "Unknown" : fmtBytes(metrics[`${kind}_used_bytes`]);
+        el(`${kind}Total`).textContent = metrics[`${kind}_total_bytes`] == null ? "Unknown" : fmtBytes(metrics[`${kind}_total_bytes`]);
+      }
+      el("systemUptime").textContent = metrics.uptime_seconds == null ? "Unavailable" : fmtUptime(metrics.uptime_seconds);
       renderCorrelationMetric();
     }
+
     function render() {
       renderMetrics();
       renderOverviewBlocks();
@@ -627,9 +612,7 @@
         return `
           <div class="log-entry" data-log-id="${esc(item.id)}">
             <span class="log-status ${status}">${status}</span>
-            <span title="${esc(item.action)}">${esc(item.action)}</span>
-            <span title="${esc(item.target)}">${esc(item.target)}</span>
-            <span title="${esc(item.actor)}">${esc(item.actor)}</span>
+            <span>${esc(item.action)} · ${esc(item.target)} · ${esc(item.actor)}</span>
             <time datetime="${esc(item.created_at)}">${esc(fmtLogDate(item.created_at))}</time>
           </div>
         `;
@@ -683,7 +666,7 @@
       field.style.fontSize = `${size}px`;
       field.scrollTop = 0;
     }
-    function blockInterfaceHtml(localBlockId, blockType = "", backendBlockId = "") {
+    function blockInterfaceHtml(localBlockId) {
       return `
         <div class="block-interface">
           <div class="human-layout">
@@ -713,10 +696,10 @@
         </div>
       `;
     }
-    function openBlockInterface(title, localBlockId, blockType = "", backendBlockId = "", overviewBlockId = "") {
+    function openBlockInterface(title, localBlockId, overviewBlockId = "") {
       uiState.activePropertyBlock = localBlockId;
       uiState.activeDescriptionBlock = localBlockId;
-      openFullscreen(title, `${overviewBlockControlsHtml(overviewBlockId)}${blockInterfaceHtml(localBlockId)}${agentPanelHtml(blockType, backendBlockId)}`);
+      openFullscreen(title, `${overviewBlockControlsHtml(overviewBlockId)}${blockInterfaceHtml(localBlockId)}`);
       if (overviewBlockId) {
         el("fullscreenTitle").contentEditable = "true";
         el("fullscreenTitle").dataset.renameType = "overview_block";
@@ -724,416 +707,14 @@
       }
       renderProperties(localBlockId);
       adjustHumanDescriptionSize();
-      if (blockType && backendBlockId) loadAgentBlock(blockType, backendBlockId, title);
     }
     function openInfoPanel(title, blockId) {
-      openBlockInterface(title, blockId, "", "", blockId);
-    }
-    function agentStatusPill(status) {
-      const normal = ["online", "healthy", "active", "busy"].includes(String(status || "").toLowerCase());
-      return `<span class="pill ${statusClass(status)}"><i class="status-spinner ${normal ? "" : "frozen"}"></i>${esc(status || "UNKNOWN")}</span>`;
-    }
-    function agentPanelHtml(blockType, blockId) {
-      if (!blockType || !blockId) {
-        return "";
-      }
-      return `
-        <section class="agent-surface" data-agent-block-type="${esc(blockType)}" data-agent-block-id="${esc(blockId)}">
-          <div><h2>Agent Nodes</h2><p class="hint">Agents are ordered top to bottom. Drag to reorder or open an Agent Node.</p></div>
-          <div id="agentNodesList" class="agent-node-list"><span class="muted">loading agent nodes</span></div>
-        </section>
-      `;
-    }
-    function openAgentManagedBlock(title, blockType, blockId) {
-      const localBlockId = `${blockType}_block`;
-      const blockTitle = overviewBlockById(localBlockId)?.name || title;
-      openBlockInterface(blockTitle, localBlockId, blockType, blockId, localBlockId);
+      openBlockInterface(title, blockId, blockId);
     }
     function openOverviewBlock(blockId) {
       const block = overviewBlockById(blockId);
       if (!block) return;
-      if (block.blockType) openAgentManagedBlock(block.name, block.blockType, block.backendBlockId);
-      else openInfoPanel(block.name, block.localBlockId);
-    }
-    async function loadAgentBlock(blockType, blockId, title = "") {
-      agentUiState.activeBlockType = blockType;
-      agentUiState.activeBlockId = blockId;
-      agentUiState.activeBlockTitle = title;
-      const root = el("agentNodesList");
-      if (root) root.innerHTML = `<span class="muted">loading agent nodes</span>`;
-      try {
-        agentUiState.assignments = await api(`/api/blocks/${encodeURIComponent(blockId)}/agents?block_type=${encodeURIComponent(blockType)}`);
-      } catch (error) {
-        agentUiState.assignments = [];
-        if (root) root.innerHTML = `<span class="muted">${esc(error.message)}</span>`;
-        return;
-      }
-      renderAgentNodes();
-    }
-    function renderAgentNodes() {
-      const root = el("agentNodesList");
-      if (!root) return;
-      const assignments = agentUiState.assignments || [];
-      root.innerHTML = assignments.map((item, index) => {
-        const agent = item.agent || {};
-        return `
-          <div class="agent-node-row" data-agent-index="${index}" data-agent-assignment-id="${esc(item.id)}">
-            <div class="agent-node-main" draggable="true" data-agent-drag-index="${index}" data-open-agent-node="${esc(agent.id || item.agent_id)}">
-              <strong>${esc(agent.display_name || agent.agent_id || item.agent_id)}</strong>
-            </div>
-            <div class="agent-node-actions">${agentStatusPill(agent.status)}<button class="danger" data-detach-agent-node="${esc(agent.id || item.agent_id)}" aria-label="detach agent">X</button></div>
-          </div>
-        `;
-      }).join("") + `<button id="openAgentLibraryModal" class="agent-add-button primary" aria-label="add agent node">+</button>`;
-    }
-    async function openAgentLibraryModal() {
-      resetModalPosition("agentLibraryModalBackdrop");
-      el("agentLibraryModalBackdrop").classList.add("open");
-      el("agentLibraryModalBackdrop").setAttribute("aria-hidden", "false");
-      await renderAgentLibrary();
-    }
-    function closeAgentLibraryModal() {
-      el("agentLibraryModalBackdrop").classList.remove("open");
-      el("agentLibraryModalBackdrop").setAttribute("aria-hidden", "true");
-    }
-    async function renderAgentLibrary() {
-      const root = el("agentLibraryList");
-      if (!root) return;
-      root.innerHTML = `<span class="muted">loading library</span>`;
-      agentUiState.library = await api("/api/agents/library");
-      renderAgentLibraryList();
-    }
-    function renderAgentLibraryList() {
-      const root = el("agentLibraryList");
-      if (!root) return;
-      const attached = new Set((agentUiState.assignments || []).map(item => item.agent_id));
-      const query = (el("agentLibrarySearch")?.value || "").trim().toLowerCase();
-      const filtered = (agentUiState.library || []).filter(agent => {
-        const haystack = `${agent.display_name || ""} ${agent.agent_id || ""} ${agent.id || ""} ${agent.status || ""}`.toLowerCase();
-        return !query || haystack.includes(query);
-      });
-      root.innerHTML = filtered.map(agent => `
-          <div class="agent-node-row" data-agent-library-index="${agentUiState.library.indexOf(agent)}">
-            <div class="agent-node-main" draggable="true" data-agent-library-drag-index="${agentUiState.library.indexOf(agent)}">
-              <strong>${esc(agent.display_name || agent.agent_id)}</strong>
-              <small>${esc(agent.status)} / attached to ${esc(agentAssignmentSummary(agent))}</small>
-            </div>
-          <button data-attach-agent-node="${esc(agent.id)}" ${attached.has(agent.id) ? "disabled" : ""}>Attach</button>
-        </div>
-      `).join("") || `<div class="muted">library is empty</div>`;
-    }
-    async function attachAgentNode(agentId) {
-      if (!agentUiState.activeBlockType || !agentUiState.activeBlockId) return;
-      await api(`/api/blocks/${encodeURIComponent(agentUiState.activeBlockId)}/agents?block_type=${encodeURIComponent(agentUiState.activeBlockType)}`, {
-        method: "POST",
-        body: JSON.stringify({ agent_id: agentId, created_by: "operator" }),
-      });
-      closeAgentLibraryModal();
-      await loadAgentBlock(agentUiState.activeBlockType, agentUiState.activeBlockId, agentUiState.activeBlockTitle);
-    }
-    async function registerAgentNode() {
-      const payload = {
-        agent_id: el("agentEnrollId").value.trim(),
-        display_name: el("agentEnrollName").value.trim(),
-        domain: el("agentEnrollDomain").value.trim(),
-        port: Number(el("agentEnrollPort").value || 7443),
-        identity_fingerprint: el("agentEnrollFingerprint").value.trim(),
-        enrollment_token: el("agentEnrollToken").value.trim(),
-      };
-      if (!payload.agent_id || !payload.display_name || !payload.domain || !payload.identity_fingerprint || !payload.enrollment_token) {
-        return alert("agent id, display name, domain, fingerprint and enrollment token are required");
-      }
-      const agent = await api("/api/agents/enroll", { method: "POST", body: JSON.stringify(payload) });
-      if (agentUiState.libraryOnly || !agentUiState.activeBlockType || !agentUiState.activeBlockId) {
-        closeAgentLibraryModal();
-        await renderAgentsPage();
-      } else {
-        await attachAgentNode(agent.id);
-      }
-      ["agentEnrollId", "agentEnrollName", "agentEnrollDomain", "agentEnrollFingerprint", "agentEnrollToken"].forEach(id => { el(id).value = ""; });
-      el("agentEnrollPort").value = "7443";
-    }
-    async function openAgentNode(agentId) {
-      if (!agentUiState.viewingAgent) {
-        agentUiState.returnContext = agentUiState.activeBlockType === "subject" && agentUiState.activeBlockId
-          ? { kind: "project", projectType: "subject", projectId: agentUiState.activeBlockId }
-          : agentUiState.activeBlockType && agentUiState.activeBlockId
-            ? { kind: "block", title: agentUiState.activeBlockTitle, blockType: agentUiState.activeBlockType, blockId: agentUiState.activeBlockId }
-            : { kind: "agents" };
-      }
-      agentUiState.viewingAgent = true;
-      agentUiState.activeAgentId = agentId;
-      agentUiState.activeJobId = "";
-      const agent = await api(`/api/agents/${encodeURIComponent(agentId)}`);
-      const [capabilities, jobs, approvals] = await Promise.all([
-        api(`/api/agents/${encodeURIComponent(agentId)}/capabilities`),
-        api(`/api/agents/${encodeURIComponent(agentId)}/jobs`),
-        api(`/api/agents/${encodeURIComponent(agentId)}/approvals`),
-      ]);
-      agentUiState.capabilities = capabilities.items || [];
-      agentUiState.jobs = jobs || [];
-      agentUiState.approvals = approvals || [];
-      openFullscreen(agent.display_name || "Agent Node", `
-        <div class="agent-workspace">
-          <aside class="agent-left">
-            <div class="agent-top">
-              <h2>Agent Node</h2>
-              <div class="agent-status-grid">
-                <span>status<br><strong>${esc(agent.status)}</strong></span>
-                <span>last heartbeat<br><strong>${esc(agent.last_heartbeat_at || "none")}</strong></span>
-              </div>
-              <details class="setting-group">
-                <summary>Settings</summary>
-                <div class="agent-status-grid">
-                  <span>name<br><strong>${esc(agent.display_name || agent.agent_id)}</strong></span>
-                  <span>agent id<br><strong>${esc(agent.id)}</strong></span>
-                  <span>domain<br><strong>${esc(agent.domain || "unknown")}</strong></span>
-                  <span>port<br><strong>${esc(agent.port || "-")}</strong></span>
-                  <span>fingerprint<br><strong>${esc(agent.identity_fingerprint || "-")}</strong></span>
-                  <span>certificate<br><strong>${esc(agent.certificate_serial || "-")}</strong></span>
-                  <span>agent version<br><strong>${esc(agent.agent_version || "-")}</strong></span>
-                  <span>sindri version<br><strong>${esc(agent.sindri_version || "-")}</strong></span>
-                </div>
-                <div class="actions">
-                  <button data-refresh-agent-node="${esc(agent.id)}">Refresh</button>
-                  <button class="danger" data-request-remove-agent-node="${esc(agent.id)}">Delete</button>
-                </div>
-              </details>
-              <h3>Approval Queue</h3>
-              <div id="agentApprovalList" class="approval-list"></div>
-            </div>
-            <div class="agent-commands">
-              <h3>Commands / Capability Catalog</h3>
-              <div id="agentCapabilityList" class="capability-list"></div>
-            </div>
-          </aside>
-          <section class="agent-live">
-            <div class="agent-live-head">
-              <h2>Server live view</h2>
-              <span id="agentActiveJob" class="pill">no active job</span>
-            </div>
-            <div class="agent-command-preview" id="agentCommandPreview">Live execution is waiting for a command from the left panel.</div>
-            <div class="job-event-list" id="agentJobEvents"></div>
-          </section>
-        </div>
-      `);
-      el("fullscreenTitle").contentEditable = "true";
-      el("fullscreenTitle").dataset.renameType = "agent";
-      el("fullscreenTitle").dataset.renameId = agent.id;
-      renderAgentCapabilityCatalog();
-      renderAgentApprovals();
-      renderAgentJobs();
-    }
-    function renderAgentCapabilityCatalog() {
-      const root = el("agentCapabilityList");
-      if (!root) return;
-      root.innerHTML = (agentUiState.capabilities || []).map(item => `
-        <button class="capability-card" data-run-agent-capability="${esc(item.action)}" ${item.available === false ? "disabled" : ""}>
-          <strong>${esc(item.title || item.action)}</strong>
-          <span>${esc(item.group || "Agent Node")} / ${esc(item.risk || "read")}</span>
-          <small>${esc(item.description || item.action)}</small>
-        </button>
-      `).join("") || `<div class="muted">no capabilities reported</div>`;
-    }
-    function renderAgentApprovals() {
-      const root = el("agentApprovalList");
-      if (!root) return;
-      root.innerHTML = (agentUiState.approvals || []).filter(item => String(item.status).toLowerCase() === "pending").map(item => `
-        <button class="approval-card" data-open-agent-approval="${esc(item.approval_id)}" data-job-id="${esc(item.job_id)}">
-          <strong>${esc(item.risk)} approval</strong>
-          <span>${esc(item.warning || "Review execution plan")}</span>
-        </button>
-      `).join("") || `<div class="muted">no pending approvals</div>`;
-    }
-    function renderAgentJobs() {
-      const root = el("agentJobEvents");
-      if (!root) return;
-      root.innerHTML = (agentUiState.jobs || []).slice(0, 8).map(job => `
-        <div class="job-event">
-          <strong>${esc(job.action)}</strong>
-          <span>${esc(job.status)} / ${esc(job.job_id)}</span>
-        </div>
-      `).join("") || `<div class="muted">no jobs yet</div>`;
-    }
-    function capabilityInputControl(spec) {
-      const name = String(spec.name || "");
-      const prompt = String(spec.prompt || name);
-      const required = spec.required ? " required" : "";
-      const defaultValue = spec.default ?? "";
-      const data = `data-capability-input="${esc(name)}"`;
-      if (spec.type === "choice") {
-        const values = Array.isArray(spec.values) ? spec.values : [];
-        return `<label>${esc(prompt)}<select ${data}${required}>${values.map(value => `<option value="${esc(value)}" ${String(value) === String(defaultValue) ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></label>`;
-      }
-      if (spec.type === "boolean") {
-        const selected = defaultValue === true || String(defaultValue).toLowerCase() === "true";
-        return `<label>${esc(prompt)}<select ${data}><option value="false" ${selected ? "" : "selected"}>No</option><option value="true" ${selected ? "selected" : ""}>Yes</option></select></label>`;
-      }
-      const type = spec.type === "integer" ? "number" : spec.type === "secret" || spec.secret ? "password" : "text";
-      const constraints = spec.type === "integer"
-        ? `${spec.minimum ? ` min="${Number(spec.minimum)}"` : ""}${spec.maximum ? ` max="${Number(spec.maximum)}"` : ""}`
-        : "";
-      return `<label>${esc(prompt)}<input type="${type}" ${data} value="${esc(defaultValue)}" autocomplete="${type === "password" ? "new-password" : "off"}"${constraints}${required} /></label>`;
-    }
-    function openAgentCapabilityInput(action) {
-      const capability = (agentUiState.capabilities || []).find(item => item.action === action);
-      if (!capability) return;
-      agentUiState.pendingCapability = capability;
-      el("agentCapabilityInputModalTitle").textContent = capability.title || capability.action;
-      el("agentCapabilityInputDescription").textContent = capability.description || capability.action;
-      el("agentCapabilityInputFields").innerHTML = (capability.inputs || []).map(capabilityInputControl).join("");
-      resetModalPosition("agentCapabilityInputModalBackdrop");
-      el("agentCapabilityInputModalBackdrop").classList.add("open");
-      el("agentCapabilityInputModalBackdrop").setAttribute("aria-hidden", "false");
-    }
-    function closeAgentCapabilityInputModal() {
-      el("agentCapabilityInputModalBackdrop").classList.remove("open");
-      el("agentCapabilityInputModalBackdrop").setAttribute("aria-hidden", "true");
-      agentUiState.pendingCapability = null;
-    }
-    function collectAgentCapabilityInputs() {
-      const capability = agentUiState.pendingCapability;
-      const inputs = {};
-      for (const spec of capability?.inputs || []) {
-        const field = el("agentCapabilityInputFields").querySelector(`[data-capability-input="${CSS.escape(String(spec.name || ""))}"]`);
-        if (!field) continue;
-        const raw = field.value;
-        if (spec.required && !String(raw).trim()) throw new Error(`${spec.prompt || spec.name} is required`);
-        if (spec.type === "integer") {
-          const value = Number(raw);
-          if (!Number.isInteger(value)) throw new Error(`${spec.prompt || spec.name} must be an integer`);
-          inputs[spec.name] = value;
-        } else if (spec.type === "boolean") {
-          inputs[spec.name] = raw === "true";
-        } else if (String(raw).length || spec.required) {
-          inputs[spec.name] = raw;
-        }
-      }
-      return inputs;
-    }
-    async function dispatchAgentCapability(action, inputs = {}) {
-      if (!agentUiState.activeAgentId) return;
-      const job = await api(`/api/agents/${encodeURIComponent(agentUiState.activeAgentId)}/jobs`, {
-        method: "POST",
-        body: JSON.stringify({ action, inputs, created_by: "operator" }),
-      });
-      agentUiState.activeJobId = job.job_id;
-      el("agentActiveJob").textContent = job.status;
-      el("agentCommandPreview").textContent = JSON.stringify({ job_id: job.job_id, action: job.action, status: job.status }, null, 2);
-      agentUiState.jobs = [job, ...(agentUiState.jobs || [])];
-      await refreshAgentJobEvents();
-    }
-    async function runAgentCapability(action) {
-      const capability = (agentUiState.capabilities || []).find(item => item.action === action);
-      if (!capability || !agentUiState.activeAgentId) return;
-      if ((capability.inputs || []).length) {
-        openAgentCapabilityInput(action);
-        return;
-      }
-      await dispatchAgentCapability(action);
-    }
-    async function confirmAgentCapabilityInput() {
-      const capability = agentUiState.pendingCapability;
-      if (!capability) return;
-      const inputs = collectAgentCapabilityInputs();
-      closeAgentCapabilityInputModal();
-      await dispatchAgentCapability(capability.action, inputs);
-    }
-    async function refreshAgentJobEvents() {
-      if (!agentUiState.activeAgentId || !agentUiState.activeJobId) return;
-      agentUiState.events = await api(`/api/agents/${encodeURIComponent(agentUiState.activeAgentId)}/jobs/${encodeURIComponent(agentUiState.activeJobId)}/events`);
-      const root = el("agentJobEvents");
-      if (root) root.innerHTML = agentUiState.events.map(item => `
-        <div class="job-event">
-          <strong>#${item.sequence} ${esc(item.event_type)}</strong>
-          <span>${esc(item.status)} ${esc(item.message || "")}</span>
-        </div>
-      `).join("") || `<div class="muted">job created, waiting for Agent Node events</div>`;
-    }
-    function openAgentApproval(approvalId, jobId) {
-      const approval = (agentUiState.approvals || []).find(item => item.approval_id === approvalId && item.job_id === jobId);
-      if (!approval) return;
-      agentUiState.activeApproval = approval;
-      agentUiState.activeJobId = approval.job_id;
-      const exterminatusConfirmation = approval.action === "system.exterminatus"
-        ? `<div class="form-grid">
-            <label>confirmation phrase<input id="agentApprovalConfirmationPhrase" autocomplete="off" placeholder="EXTERMINATUS" /></label>
-            <label>agent hostname<input id="agentApprovalHostname" autocomplete="off" placeholder="${esc(approval.hostname || "exact agent hostname")}" /></label>
-          </div>
-          <p class="hint">This command requires the exact phrase <code>EXTERMINATUS</code> and the Agent hostname${approval.hostname ? ` (<code>${esc(approval.hostname)}</code>)` : ""}.</p>`
-        : "";
-      el("agentApprovalBody").innerHTML = `
-        <div><strong>command</strong><br>${esc(approval.action || "agent command")}</div>
-        <div><strong>risk</strong><br>${esc(approval.risk)}</div>
-        <div><strong>warning</strong><br>${esc(approval.warning || "Review execution plan")}</div>
-        <div class="agent-command-preview">${esc(JSON.stringify(approval.plan || [], null, 2))}</div>
-        ${exterminatusConfirmation}
-      `;
-      resetModalPosition("agentApprovalModalBackdrop");
-      el("agentApprovalModalBackdrop").classList.add("open");
-      el("agentApprovalModalBackdrop").setAttribute("aria-hidden", "false");
-    }
-    async function refreshPendingApprovals() {
-      if (document.querySelector(".modal-backdrop.open")) return;
-      const approvals = await api("/api/approvals/pending");
-      const next = (approvals || []).find(item => !agentUiState.presentedApprovalIds.has(item.approval_id));
-      if (!next) return;
-      agentUiState.presentedApprovalIds.add(next.approval_id);
-      agentUiState.activeAgentId = next.agent_id;
-      agentUiState.approvals = approvals;
-      openAgentApproval(next.approval_id, next.job_id);
-    }
-    function closeAgentApprovalModal() {
-      el("agentApprovalModalBackdrop").classList.remove("open");
-      el("agentApprovalModalBackdrop").setAttribute("aria-hidden", "true");
-      agentUiState.activeApproval = null;
-    }
-    function requestRemoveAgentNode(agentId) {
-      agentUiState.pendingRemoveAgentId = agentId;
-      resetModalPosition("agentRemoveModalBackdrop");
-      el("agentRemoveModalBackdrop").classList.add("open");
-      el("agentRemoveModalBackdrop").setAttribute("aria-hidden", "false");
-    }
-    function closeAgentRemoveModal() {
-      el("agentRemoveModalBackdrop").classList.remove("open");
-      el("agentRemoveModalBackdrop").setAttribute("aria-hidden", "true");
-      agentUiState.pendingRemoveAgentId = "";
-    }
-    async function decideAgentApproval(decision) {
-      const approval = agentUiState.activeApproval;
-      if (!approval || !agentUiState.activeAgentId) return;
-      const confirmationPhrase = el("agentApprovalConfirmationPhrase")?.value || "";
-      const hostnameConfirmation = el("agentApprovalHostname")?.value || "";
-      if (decision === "approve" && approval.action === "system.exterminatus") {
-        if (confirmationPhrase !== "EXTERMINATUS") throw new Error("Enter the exact confirmation phrase EXTERMINATUS");
-        if (!hostnameConfirmation.trim()) throw new Error("Enter the exact Agent hostname");
-      }
-      await api(`/api/agents/${encodeURIComponent(agentUiState.activeAgentId)}/jobs/${encodeURIComponent(approval.job_id)}/${decision}`, {
-        method: "POST",
-        body: JSON.stringify({
-          approval_id: approval.approval_id,
-          plan_hash: approval.plan_hash,
-          decided_by: "operator",
-          confirmation_phrase: confirmationPhrase,
-          hostname_confirmation: hostnameConfirmation,
-        }),
-      });
-      closeAgentApprovalModal();
-      if (el("agentApprovalList")) await openAgentNode(agentUiState.activeAgentId);
-      await refreshPendingApprovals();
-    }
-    async function removeAgentNode(agentId) {
-      await api(`/api/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" });
-      closeAgentRemoveModal();
-      agentUiState.viewingAgent = false;
-      await refresh();
-      closeFullscreen();
-      showView("agents");
-    }
-    async function detachAgentNode(agentId) {
-      if (!agentUiState.activeBlockType || !agentUiState.activeBlockId) return;
-      await api(`/api/blocks/${encodeURIComponent(agentUiState.activeBlockId)}/agents/${encodeURIComponent(agentId)}?block_type=${encodeURIComponent(agentUiState.activeBlockType)}`, { method: "DELETE" });
-      await loadAgentBlock(agentUiState.activeBlockType, agentUiState.activeBlockId, agentUiState.activeBlockTitle);
+      openInfoPanel(block.name, block.localBlockId);
     }
     function moveOrderedItem(items, from, to, after = false) {
       if (from === null || to === null || from < 0 || to < 0 || !items[from] || !items[to]) return items;
@@ -1159,31 +740,6 @@
     function showDropIndicator(item, after) {
       clearDropIndicators();
       item.classList.add(after ? "drop-after" : "drop-before");
-    }
-    async function reorderAgentNodes(from, to, after = false) {
-      if (from === null || to === null) return;
-      const assignments = [...(agentUiState.assignments || [])];
-      const reordered = moveOrderedItem(assignments, from, to, after);
-      if (reordered.every((item, index) => item === assignments[index])) return;
-      agentUiState.assignments = reordered;
-      renderAgentNodes();
-      await api(`/api/blocks/${encodeURIComponent(agentUiState.activeBlockId)}/agents/reorder?block_type=${encodeURIComponent(agentUiState.activeBlockType)}`, {
-        method: "POST",
-        body: JSON.stringify({ ordered_agent_ids: reordered.map(item => item.agent_id) }),
-      });
-      await loadAgentBlock(agentUiState.activeBlockType, agentUiState.activeBlockId, agentUiState.activeBlockTitle);
-    }
-    async function reorderAgentLibrary(from, to, after = false) {
-      const current = [...(agentUiState.library || [])];
-      const reordered = moveOrderedItem(current, from, to, after);
-      if (reordered.every((item, index) => item === current[index])) return;
-      agentUiState.library = reordered;
-      renderAgentLibraryList();
-      renderAgentsPageList();
-      await api("/api/agents/reorder", {
-        method: "POST",
-        body: JSON.stringify({ ordered_agent_ids: reordered.map(item => item.id) }),
-      });
     }
     function reorderPropertyLibrary(from, to, after = false) {
       const current = [...(uiState.propertyLibrary || [])];
@@ -1350,43 +906,18 @@
         `<button data-create-pod="${item.id}">Create Pod</button><button class="danger" data-request-entity-delete="subject" data-entity-id="${item.id}" data-entity-name="${esc(item.name)}">Delete Subject</button>`
       )).join("") || `<div class="muted">no subjects</div>`;
     }
-    async function renderAgentsPage() {
-      const root = el("agentsPageList");
-      if (!root) return;
-      const agents = await api("/api/agents/library");
-      agentUiState.library = agents;
-      renderAgentsPageList();
-    }
-    function agentAssignmentSummary(agent) {
-      const assignments = agent.assignments || [];
-      if (!assignments.length) return "not attached";
-      return assignments.map(item => `${item.name} (${item.block_type})`).join(", ");
-    }
-    function renderAgentsPageList() {
-      const root = el("agentsPageList");
-      if (!root) return;
-      const query = String(el("agentsPageSearch")?.value || "").trim().toLowerCase();
-      const agents = (agentUiState.library || [])
-        .map((agent, index) => ({ agent, index }))
-        .filter(({ agent }) => !query || `${agent.display_name || ""} ${agent.agent_id || ""} ${agent.id || ""} ${agent.status || ""} ${agentAssignmentSummary(agent)}`.toLowerCase().includes(query));
-      root.innerHTML = agents.map(({ agent, index }) => `
-        <div class="agent-node-row" data-agent-library-index="${index}" data-open-library-agent="${esc(agent.id)}">
-          <div class="agent-node-main" draggable="true" data-agent-library-drag-index="${index}"><strong>${esc(agent.display_name || agent.agent_id)}</strong><small>id ${esc(agent.id)} / attached to ${esc(agentAssignmentSummary(agent))}</small></div>
-          ${agentStatusPill(agent.status)}
-        </div>
-      `).join("") || `<div class="muted">${query ? "No agents match this search." : "No agents registered."}</div>`;
-    }
     function renderPodsPage() {
       const root = el("podsPageList");
       if (!root) return;
       const query = String(el("podsPageSearch")?.value || "").trim().toLowerCase();
       const pods = (state.pods || []).filter(item => !query || `${item.login || ""} ${item.name || ""} ${item.id || ""} ${item.subject_name || ""} ${item.subject_id || ""} ${item.kind || ""} ${item.status || ""}`.toLowerCase().includes(query));
+      if (el("podsCount")) el("podsCount").textContent = `${pods.length} of ${(state.pods || []).length}`;
       root.innerHTML = pods.map(item => {
         const active = String(item.status || "").toLowerCase() === "active";
         const status = item.kind === "instance" ? (active ? "Online" : "Offline") : humanizeError(item.status || "Pending");
         return `
-          <div class="agent-node-row" data-open-global-pod="${esc(item.id)}">
-            <div class="agent-node-main">
+          <div class="collection-row" data-open-global-pod="${esc(item.id)}">
+            <div class="collection-item-main">
               <strong>${esc(item.login || item.name)}</strong>
               <small>subject ${esc(item.subject_name || item.subject_id)} / id ${esc(item.subject_id)} / ${esc(item.kind)}</small>
             </div>
@@ -1414,8 +945,9 @@
       const properties = (uiState.propertyLibrary || [])
         .map((property, index) => ({ property, index }))
         .filter(({ property }) => !query || `${property.key || ""} ${property.value || ""} ${property.type || ""} ${property.id || ""}`.toLowerCase().includes(query));
+      if (el("propertiesCount")) el("propertiesCount").textContent = `${properties.length} of ${(uiState.propertyLibrary || []).length}`;
       root.innerHTML = properties.map(({ property, index }) => `
-        <div class="library-property-row" draggable="true" data-library-property-index="${index}" data-edit-library-property="${index}">
+        <div class="library-property-row" draggable="${!query}" data-library-property-index="${index}" data-edit-library-property="${index}">
           <strong>${esc(property.key || property.type)}</strong><span>${esc(property.value || "")}</span>
         </div>
       `).join("") || `<div class="muted">${query ? "No properties match this search." : "No properties registered."}</div>`;
@@ -1541,11 +1073,7 @@
         passwordModalBackdrop: closePasswordModal,
         backupImportModalBackdrop: closeBackupImportModal,
         updateInstallModalBackdrop: closeUpdateInstallModal,
-        agentLibraryModalBackdrop: closeAgentLibraryModal,
-        agentRemoveModalBackdrop: closeAgentRemoveModal,
         entityDeleteModalBackdrop: closeEntityDeleteModal,
-        agentApprovalModalBackdrop: closeAgentApprovalModal,
-        agentCapabilityInputModalBackdrop: closeAgentCapabilityInputModal,
         podModalBackdrop: closePodModal,
       };
       closers[backdrop?.id]?.();
@@ -1618,14 +1146,13 @@
       render();
     }
     function openProjectDetail(type, id) {
-      const item = type === "object" ? state.objects.find(entry => entry.id === id) : type === "subject" ? state.subjects.find(entry => entry.id === id) : agentUiState.library.find(entry => entry.id === id);
+      const item = type === "object" ? state.objects.find(entry => entry.id === id) : state.subjects.find(entry => entry.id === id);
       if (!item) return;
       const title = item.name;
       const actions = type === "object"
         ? `<button data-object-subject="${item.id}">Create Subject</button><button data-choose-entity-image="object" data-entity-id="${item.id}">Upload Image</button>${item.image_url ? `<button data-remove-entity-image="object" data-entity-id="${item.id}">Remove Image</button>` : ""}<button class="danger" data-request-entity-delete="object" data-entity-id="${item.id}" data-entity-name="${esc(item.name)}">Delete Object</button>`
         : `<button data-choose-entity-image="subject" data-entity-id="${item.id}">Upload Image</button>${item.image_url ? `<button data-remove-entity-image="subject" data-entity-id="${item.id}">Remove Image</button>` : ""}<button class="danger" data-request-entity-delete="subject" data-entity-id="${item.id}" data-entity-name="${esc(item.name)}">Delete Subject</button>`;
       const localBlockId = `${type}_${id}`;
-      const agentBlock = type === "subject" ? { blockType: "subject", blockId: item.id } : { blockType: "", blockId: "" };
       uiState.activePropertyBlock = localBlockId;
       uiState.activeDescriptionBlock = localBlockId;
       openFullscreen(title, `
@@ -1638,7 +1165,6 @@
           <input id="entityImageInput" type="file" accept="image/png,image/jpeg,image/webp" hidden />
          </div>
          ${blockInterfaceHtml(localBlockId)}
-         ${agentPanelHtml(agentBlock.blockType, agentBlock.blockId)}
          ${type === "subject" ? subjectPodWorkspaceHtml(item.id) : ""}
        `);
       el("fullscreenBody").classList.add("entity-detail");
@@ -1648,7 +1174,6 @@
       renderProperties(localBlockId);
       adjustHumanDescriptionSize();
       if (type === "subject") {
-        loadAgentBlock("subject", item.id, title);
         loadSubjectWorkspace(item.id).catch(error => alert(error.message));
       }
     }
@@ -1727,22 +1252,6 @@
       }
     }
     function closeFullscreen() {
-      if (agentUiState.viewingAgent) {
-        const destination = agentUiState.returnContext;
-        agentUiState.viewingAgent = false;
-        agentUiState.activeAgentId = "";
-        if (destination?.kind === "block") {
-          openAgentManagedBlock(destination.title || "Agent Nodes", destination.blockType, destination.blockId);
-          return;
-        }
-        if (destination?.kind === "project") {
-          openProjectDetail(destination.projectType, destination.projectId);
-          return;
-        }
-        agentUiState.activeBlockType = "";
-        agentUiState.activeBlockId = "";
-        showView("agents");
-      }
       el("fullscreenPanel").classList.remove("open");
       el("fullscreenPanel").setAttribute("aria-hidden", "true");
       el("fullscreenTitle").textContent = "";
@@ -1750,11 +1259,10 @@
       el("fullscreenBody").innerHTML = "";
     }
     async function refresh() {
-      const [objects, subjects, pods, agents, overviewBlocks, audit, logs, metrics, backups, correlation, runtime, updaterRuntime] = await Promise.all([
+      const [objects, subjects, pods, overviewBlocks, audit, logs, metrics, backups, correlation, runtime, updaterRuntime] = await Promise.all([
         api("/v1/objects"),
         api("/v1/subjects"),
         api("/v1/pods"),
-        api("/v1/agents"),
         api("/v1/overview-blocks"),
         api("/v1/audit"),
         api("/v1/logs/audit"),
@@ -1764,7 +1272,7 @@
         api("/v1/settings/runtime"),
         api("/v1/updater/status"),
       ]);
-      Object.assign(state, { objects, subjects, pods, agents, overviewBlocks, audit, logs: logs.entries || [], metrics, backups, runtime, updaterRuntime });
+      Object.assign(state, { objects, subjects, pods, overviewBlocks, audit, logs: logs.entries || [], metrics, backups, runtime, updaterRuntime });
 
       uiState.descriptionsByBlock = correlation.descriptions_by_block || {};
       uiState.propertiesByBlock = correlation.properties_by_block || {};
@@ -1820,9 +1328,7 @@
         ? state.objects.find(entry => entry.id === id)
         : type === "subject"
           ? state.subjects.find(entry => entry.id === id)
-          : type === "agent"
-            ? agentUiState.library.find(entry => entry.id === id)
-            : overviewBlockById(id);
+          : overviewBlockById(id);
       const name = titleElement.textContent.trim();
       if (!name) {
         titleElement.textContent = item?.name || item?.display_name || "Untitled";
@@ -1830,14 +1336,12 @@
       }
       const previousName = item?.name || item?.display_name;
       if (name === previousName) return;
-      const path = type === "agent"
-        ? `/api/agents/${encodeURIComponent(id)}`
-        : type === "overview_block"
+      const path = type === "overview_block"
           ? `/v1/overview-blocks/${encodeURIComponent(id)}`
           : `/v1/${type === "object" ? "objects" : "subjects"}/${encodeURIComponent(id)}`;
       await api(path, {
         method: "PATCH",
-        body: JSON.stringify(type === "agent" ? { display_name: name } : { name }),
+        body: JSON.stringify({ name }),
       });
       await refresh();
       titleElement.textContent = name;
@@ -1872,14 +1376,20 @@
       document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
       button.classList.add("active");
       view.classList.add("active");
+      if (operatorPreferences) previewAccent(operatorPreferences.theme.accent);
+      if (viewName === "documentation") {
+        document.querySelector(".documentation-content").scrollTop = 0;
+        document.querySelector(".documentation-nav").scrollTop = 0;
+        requestAnimationFrame(syncDocumentationCurrent);
+      }
       el("viewTitle").textContent = button.querySelector("span")?.textContent || button.textContent;
       if (viewName === "correlationMap") requestAnimationFrame(initCorrelationMap);
-      if (viewName === "agents") renderAgentsPage().catch(error => alert(error.message));
       if (viewName === "pods") loadPodsPage().catch(error => alert(error.message));
       if (viewName === "properties") renderPropertiesPage();
     }
     function filterDocumentation(query) {
       const normalized = String(query || "").trim().toLowerCase();
+      document.querySelector(".documentation-content").scrollTop = 0;
       let visible = 0;
       document.querySelectorAll(".documentation-content article").forEach(article => {
         const searchable = `${article.dataset.docTitle || ""} ${article.textContent || ""}`.toLowerCase();
@@ -1890,7 +1400,9 @@
         const target = document.querySelector(link.getAttribute("href"));
         link.hidden = Boolean(target?.hidden);
       });
+      document.querySelectorAll(".documentation-nav-group").forEach(group => { group.hidden = !group.querySelector("a:not([hidden])"); });
       el("documentationEmpty").hidden = visible !== 0;
+      requestAnimationFrame(syncDocumentationCurrent);
     }
     document.querySelectorAll(".nav button").forEach(button => button.addEventListener("click", () => {
       showView(button.dataset.view);
@@ -1912,10 +1424,16 @@
       el(id)?.addEventListener(id === "graphAnimate" ? "change" : "input", updateGraphSettingsFromControls);
     });
     document.addEventListener("click", async event => {
-      const target = event.target;
+      const target = event.target instanceof Element
+        ? event.target.closest("button, a.button") || event.target
+        : event.target;
       if (!(target instanceof HTMLElement)) return;
       try {
-        if (target.matches(".modal-backdrop.open")) { closeBackdrop(target); return; }
+        if (target.matches(".modal-backdrop.open")) {
+          const hasInput = target.dataset.dirty === "true" || [...target.querySelectorAll('input[type=password],input[type=file]')].some(field => field.value);
+          if (!hasInput && target.id !== "updateWarningBackdrop") closeBackdrop(target);
+          return;
+        }
         if (target.dataset.chooseEntityImage && target.dataset.entityId) {
           const input = el("entityImageInput");
           input.dataset.entityType = target.dataset.chooseEntityImage;
@@ -1951,20 +1469,9 @@
         if (target.id === "closeBackupImportModal") closeBackupImportModal();
         if (target.id === "closeUpdateInstallModal" || target.id === "cancelInstallUpdate") closeUpdateInstallModal();
         if (target.id === "confirmInstallUpdate") await installUpdate();
-        if (target.id === "openAgentLibraryModal") { agentUiState.libraryOnly = false; await openAgentLibraryModal(); }
-        if (target.dataset.addAgentLibrary) {
-          agentUiState.libraryOnly = true;
-          agentUiState.activeBlockType = "";
-          agentUiState.activeBlockId = "";
-          await openAgentLibraryModal();
-        }
         if (target.dataset.addLibraryProperty) openPropertyModal("__library__");
         const libraryProperty = target.closest("[data-edit-library-property]");
         if (libraryProperty?.dataset.editLibraryProperty !== undefined) openPropertyModal("__library__", Number(libraryProperty.dataset.editLibraryProperty));
-        if (target.id === "closeAgentLibraryModal") closeAgentLibraryModal();
-        if (target.id === "closeAgentApprovalModal") closeAgentApprovalModal();
-        if (target.id === "closeAgentCapabilityInputModal" || target.id === "cancelAgentCapabilityInput") closeAgentCapabilityInputModal();
-        if (target.id === "closeAgentRemoveModal" || target.id === "cancelRemoveAgentNode") closeAgentRemoveModal();
         if (target.id === "closeEntityDeleteModal" || target.id === "cancelEntityDelete") closeEntityDeleteModal();
         if (target.id === "closePodModal" || target.dataset.closePodAfterCreate) closePodModal();
         if (target.dataset.addSystemTab) renderSubjectSystemTabs([...collectSubjectSystemTabs(), { id: uid(), title: "", url: "", required: true, position: collectSubjectSystemTabs().length }]);
@@ -1991,11 +1498,6 @@
         if (target.dataset.cancelPodDelete && subjectPodState.selected) openPodItem(subjectPodState.selected.kind, subjectPodState.selected.item.id);
         if (target.dataset.confirmRevokePod) { await api(`/v1/pods/${encodeURIComponent(target.dataset.confirmRevokePod)}`, { method: "DELETE" }); await refreshSubjectPodsAndModal(); }
         if (target.id === "confirmEntityDelete") await confirmEntityDelete();
-        if (target.id === "registerAgentNode") await registerAgentNode();
-        if (target.id === "approveAgentJob") await decideAgentApproval("approve");
-        if (target.id === "rejectAgentJob") await decideAgentApproval("reject");
-        if (target.id === "confirmAgentCapabilityInput") await confirmAgentCapabilityInput();
-        if (target.id === "confirmRemoveAgentNode" && agentUiState.pendingRemoveAgentId) await removeAgentNode(agentUiState.pendingRemoveAgentId);
         if (target.id === "saveProperty") savePropertyFromModal();
         if (target.id === "deleteProperty") deletePropertyFromModal();
         const propertyItem = target.closest(".property-item");
@@ -2023,37 +1525,19 @@
           if (panelName === "I as human in general") openInfoPanel("I as human in general", "human_general");
           else if (panelName === "Turkey / Global sphere") openInfoPanel("Turkey / Global sphere", "turkey_global");
           else if (panelName === "Russia influence sphere") openInfoPanel("Russia influence sphere", "russia_sphere");
-          else if (panelName === "Laboratory") openAgentManagedBlock("Laboratory", "laboratory", "laboratory");
-          else if (panelName === "Perimetr") openAgentManagedBlock("Perimetr", "perimetr", PERIMETR_BLOCK_ID);
+          else if (panelName === "Laboratory") openInfoPanel("Laboratory", "laboratory_block");
+          else if (panelName === "Perimetr") openInfoPanel("Perimetr", "perimetr_block");
           else openFullscreen(panelName);
         }
         const projectCard = target.closest("[data-project-type][data-project-id]");
         if (projectCard?.dataset.projectType && projectCard.dataset.projectId) openProjectDetail(projectCard.dataset.projectType, projectCard.dataset.projectId);
-        if (target.dataset.attachAgentNode) await attachAgentNode(target.dataset.attachAgentNode);
-        const agentNodeItem = target.closest("[data-open-agent-node]");
-        if (agentNodeItem?.dataset.openAgentNode) await openAgentNode(agentNodeItem.dataset.openAgentNode);
-        const libraryAgent = target.closest("[data-open-library-agent]");
-        if (libraryAgent?.dataset.openLibraryAgent) {
-          agentUiState.activeBlockType = "";
-          agentUiState.activeBlockId = "";
-          agentUiState.activeBlockTitle = "";
-          await openAgentNode(libraryAgent.dataset.openLibraryAgent);
-        }
-        if (target.dataset.detachAgentNode) await detachAgentNode(target.dataset.detachAgentNode);
-        if (target.dataset.refreshAgentNode) await openAgentNode(target.dataset.refreshAgentNode);
-        if (target.dataset.requestRemoveAgentNode) requestRemoveAgentNode(target.dataset.requestRemoveAgentNode);
-        if (target.dataset.removeAgentNode) requestRemoveAgentNode(target.dataset.removeAgentNode);
-        const capabilityItem = target.closest("[data-run-agent-capability]");
-        if (capabilityItem?.dataset.runAgentCapability) await runAgentCapability(capabilityItem.dataset.runAgentCapability);
-        const approvalItem = target.closest("[data-open-agent-approval]");
-        if (approvalItem?.dataset.openAgentApproval && approvalItem.dataset.jobId) openAgentApproval(approvalItem.dataset.openAgentApproval, approvalItem.dataset.jobId);
         if (target.dataset.createProject) openProjectCreateModal();
         if (target.id === "createObject") await createObject();
         if (target.id === "createSubject") await createSubject();
         if (target.id === "applyTheme") await applyTheme();
         if (target.id === "resetTheme") previewAccent("#00A8FF");
         if (target.id === "createBackup") await createBackup();
-        if (target.id === "checkForUpdates") await checkForUpdates();
+        if (target.id === "checkForUpdates") await checkForUpdates(true, "perimetr");
         if (target.id === "installUpdate") openUpdateInstallModal();
         if (target.id === "importBackup") await importBackup();
         if (target.id === "changePassword") await changePassword();
@@ -2082,7 +1566,7 @@
     });
     document.addEventListener("pointerover", event => {
       const target = event.target instanceof HTMLElement
-        ? event.target.closest("button, a.button, input, select, textarea, .overview-tile, .project-card, .property-item, .library-item, .agent-node-row, .capability-card, .approval-card")
+        ? event.target.closest("button, a.button, input, select, textarea, .overview-tile, .project-card, .property-item, .library-item, .collection-row")
         : null;
       if (target instanceof HTMLElement && !target.classList.contains("human-description")) {
         applySafeHoverScale(target);
@@ -2094,7 +1578,7 @@
       if (target.closest("button, input, select, textarea, a")) return;
       const head = target.closest(".modal-head");
       if (!head) return;
-      const modal = head.closest(".property-modal, .settings-modal, .agent-modal");
+      const modal = head.closest(".property-modal, .settings-modal");
       if (!(modal instanceof HTMLElement)) return;
       const rect = modal.getBoundingClientRect();
       modal.style.position = "fixed";
@@ -2129,8 +1613,6 @@
       if (target.id === "subjectVlessConnection" && subjectPodState.subjectId) {
         scheduleSubjectProxyAutosave(subjectPodState.subjectId, target.value);
       }
-      if (target.id === "agentLibrarySearch") renderAgentLibraryList();
-      if (target.id === "agentsPageSearch") renderAgentsPageList();
       if (target.id === "podsPageSearch") renderPodsPage();
       if (target.id === "propertiesPageSearch") renderPropertiesPage();
       if (target.id === "propertyType") updatePropertyModalMode();
@@ -2153,16 +1635,6 @@
         target.classList.add("dragging");
         event.dataTransfer?.setData("text/plain", target.dataset.propertyIndex);
       }
-      if (target.dataset.agentDragIndex !== undefined) {
-        agentUiState.draggedAgentIndex = Number(target.dataset.agentDragIndex);
-        target.classList.add("dragging");
-        event.dataTransfer?.setData("application/x-perimetr-agent-index", target.dataset.agentDragIndex);
-      }
-      if (target.dataset.agentLibraryDragIndex !== undefined) {
-        agentUiState.draggedLibraryAgentIndex = Number(target.dataset.agentLibraryDragIndex);
-        target.classList.add("dragging");
-        event.dataTransfer?.setData("application/x-perimetr-agent-library-index", target.dataset.agentLibraryDragIndex);
-      }
       if (target.dataset.libraryPropertyIndex !== undefined) {
         uiState.draggedLibraryPropertyIndex = Number(target.dataset.libraryPropertyIndex);
         target.classList.add("dragging");
@@ -2179,8 +1651,6 @@
       uiState.draggedNavView = "";
       uiState.draggedMetricId = "";
       uiState.draggedLibraryPropertyIndex = null;
-      agentUiState.draggedAgentIndex = null;
-      agentUiState.draggedLibraryAgentIndex = null;
       clearDropIndicators();
     });
     document.addEventListener("dragover", event => {
@@ -2190,17 +1660,12 @@
       if (navTarget && uiState.draggedNavView) { event.preventDefault(); showDropIndicator(navTarget, isDropAfter(event, navTarget)); return; }
       const metricTarget = target.closest(".metric[data-metric-id]");
       if (metricTarget && uiState.draggedMetricId) { event.preventDefault(); showDropIndicator(metricTarget, isMetricDropAfter(event, metricTarget)); return; }
-      const agentTarget = target.closest("[data-agent-index]");
-      if (agentTarget && agentUiState.draggedAgentIndex !== null) { event.preventDefault(); showDropIndicator(agentTarget, isDropAfter(event, agentTarget)); return; }
-      const agentLibraryTarget = target.closest("[data-agent-library-index]");
-      if (agentLibraryTarget && agentUiState.draggedLibraryAgentIndex !== null) { event.preventDefault(); showDropIndicator(agentLibraryTarget, isDropAfter(event, agentLibraryTarget)); return; }
       const propertyTarget = target.closest("[data-property-index]");
       if (propertyTarget && (uiState.draggedPropertyIndex !== null || uiState.draggedLibraryPropertyIndex !== null)) { event.preventDefault(); showDropIndicator(propertyTarget, isDropAfter(event, propertyTarget)); return; }
       const propertyLibraryTarget = target.closest("[data-library-property-index]");
       if (propertyLibraryTarget && uiState.draggedLibraryPropertyIndex !== null) { event.preventDefault(); showDropIndicator(propertyLibraryTarget, isDropAfter(event, propertyLibraryTarget)); return; }
       const propertyList = target.closest(".property-list");
       if (propertyList && (uiState.draggedPropertyIndex !== null || uiState.draggedLibraryPropertyIndex !== null)) { event.preventDefault(); showDropIndicator(propertyList, false); return; }
-      if (target.closest(".agent-node-list")) event.preventDefault();
     });
     document.addEventListener("drop", event => {
       const target = event.target;
@@ -2229,22 +1694,6 @@
           recordUiAction("dashboard.metrics.reordered", "dashboard", "metrics");
         }
         clearDropIndicators(); event.preventDefault(); return;
-      }
-      const agentLibraryItem = target.closest("[data-agent-library-index]");
-      if (agentLibraryItem && agentUiState.draggedLibraryAgentIndex !== null) {
-        event.preventDefault();
-        const after = isDropAfter(event, agentLibraryItem);
-        clearDropIndicators();
-        reorderAgentLibrary(agentUiState.draggedLibraryAgentIndex, Number(agentLibraryItem.dataset.agentLibraryIndex), after).catch(error => alert(error.message));
-        return;
-      }
-      const agentItem = target.closest("[data-agent-index]");
-      if (agentItem && agentUiState.draggedAgentIndex !== null) {
-        event.preventDefault();
-        const after = isDropAfter(event, agentItem);
-        clearDropIndicators();
-        reorderAgentNodes(agentUiState.draggedAgentIndex, Number(agentItem.dataset.agentIndex), after).catch(error => alert(error.message));
-        return;
       }
       const propertyLibraryItem = target.closest("[data-library-property-index]");
       if (propertyLibraryItem && uiState.draggedLibraryPropertyIndex !== null) {

@@ -2,39 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 import base64
 import html
 import io
-import json
 import logging
 from pathlib import Path
 import re
 import secrets
 import hashlib
-from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
-from sqlalchemy import delete, func, select, text
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .. import core_ui
-from ..agent_client import (
-    AgentTransportError,
-    cancel_job as cancel_remote_agent_job,
-    decide_job as decide_remote_agent_job,
-    dispatch_job as dispatch_remote_agent_job,
-    enroll as enroll_remote_agent,
-)
-from ..agent_request_security import (
-    AgentRequestAuthError,
-    AgentRequestReplayCache,
-    has_signature_headers,
-    request_target,
-    verify_agent_request,
-)
-from ..controller_identity import ensure_controller_signing_material
 from ..operations_api import register as register_operations
 from ..logs_api import register as register_logs
 from ..database import SessionLocal, get_db
@@ -42,27 +25,12 @@ from ..database_migrations import upgrade_database
 from ..enums import LaunchDecision, SessionStatus
 from ..models import (
     AccessPolicy,
-    Agent,
-    AgentAssignment,
-    AgentCapability,
-    AgentCertificate,
-    AgentCommand,
-    AgentEndpoint,
-    AgentHeartbeat,
-    AgentJob,
-    AgentStateEvent,
-    ApprovalDecision,
-    ApprovalRequest,
     AuditEvent,
-    CertificateDenylist,
     Pod,
     PodDenylist,
     PodProvisioningRecord,
-    JobEvent,
-    JobResult,
     LaunchAuthorization,
     PerimetrObject,
-    RevocationRecord,
     SessionLease,
     Subject,
     SystemSetting,
@@ -70,25 +38,7 @@ from ..models import (
 )
 from ..schemas import (
     AccessKeyChange,
-    AgentAssignmentCreate,
-    AgentAssignmentRead,
-    AgentControlHeartbeatRequest,
-    AgentControlRead,
-    AgentCommandCreate,
-    AgentCommandRead,
-    AgentCommandStatusUpdate,
-    AgentEnrollRequest,
-    AgentHeartbeatRequest,
-    AgentJobCreate,
-    AgentJobRead,
-    AgentRead,
-    AgentRegisterRequest,
-    AgentReorderRequest,
-    AgentUpdateRequest,
-    ApprovalDecisionRequest,
-    ApprovalRequestRead,
     AuditRead,
-    BackupRead,
     PodHeartbeatRequest,
     PodEnrollRead,
     PodEnrollRequest,
@@ -105,7 +55,6 @@ from ..schemas import (
     ErrorPayload,
     ErrorResponse,
     HealthResponse,
-    JobEventRead,
     LaunchAuthorizationRead,
     MaterializeResponse,
     ObjectCreate,
@@ -125,11 +74,9 @@ from ..schemas import (
 )
 from ..pod_service import (
     build_pod_bundle,
-    decrypt_secret,
     encrypt_secret,
     hash_token,
     hash_pod_password,
-    heartbeat_signing_bytes,
     issue_enrollment_token,
     issue_identity_certificate,
     issue_pod_access_grant,
@@ -158,42 +105,23 @@ from ..services import (
     build_system_metrics,
     build_topology_snapshot,
     create_direct_session,
-    ensure_allowed_agent_command,
     ensure_perimetr_system_settings,
     expire_stale_sessions,
     get_correlation_state,
-    get_agent,
-    apply_agent_heartbeat,
-    apply_agent_job_event,
-    assign_agent_to_block,
-    get_command,
     get_pod,
-    create_agent_job,
-    decide_approval,
     get_object,
     get_overview_blocks,
-    get_agent_job,
-    find_agent,
     get_session_lease,
     get_subject,
     hash_session_key,
-    normalize_agent_block_type,
     normalize_timestamp,
-    list_pending_agent_commands,
     normalize_access_target,
     now_utc,
-    record_job_event,
     revoke_subject_access,
-    reorder_block_agents,
-    summarize_agent,
-    unassign_agent_from_block,
-    upsert_agent_capabilities,
     update_access_key,
     update_overview_block,
     verify_direct_login,
-    update_agent_command_status,
     update_correlation_state,
-    visible_agent_status,
     correlation_percentage,
 )
 from ..settings import Settings, get_settings
@@ -201,8 +129,6 @@ from ..security import LoginRateLimiter, validate_runtime_settings, csrf_token
 from ..request_policy import client_identity, validate_browser_origin, validate_csrf
 from ..operator_settings import ensure_preferences, public_preferences, update_preferences
 from ..redaction import redact
-from ..updater import check_github_release
-from .. import updater_client
 
 
 ROBOTS_POLICY = (Path(__file__).resolve().parents[1] / "robots.txt").read_text(
@@ -223,12 +149,6 @@ PERIMETR_SESSION_ID_COOKIE = "perimetr_session_id"
 PERIMETR_SESSION_KEY_COOKIE = "perimetr_session_key"
 MAX_ENTITY_IMAGE_BYTES = 4 * 1024 * 1024
 logger = logging.getLogger(__name__)
-
-
-
-
-
-
 
 
 def _remove_correlation_block(db: Session, block_key: str) -> None:
@@ -367,7 +287,6 @@ def create_app() -> FastAPI:
     from ..request_policy import RequestBoundary
     app.add_middleware(RequestBoundary)
     app.state.login_rate_limiter = LoginRateLimiter()
-    app.state.agent_request_replay_cache = AgentRequestReplayCache()
 
     @app.middleware("http")
     async def anti_indexing_headers(request: Request, call_next):
@@ -571,37 +490,6 @@ def create_app() -> FastAPI:
         db.commit()
         return value
 
-    async def require_agent_callback_authentication(
-        request: Request,
-        agent: Agent,
-    ) -> None:
-        metadata = dict(agent.metadata_json or {})
-        if not metadata.get("remote_enrolled"):
-            return
-        headers = request.headers
-        if not has_signature_headers(headers):
-            if metadata.get("request_signing_required"):
-                raise HTTPException(status_code=403, detail="AGENT_SIGNATURE_REQUIRED")
-            if not secrets.compare_digest(
-                headers.get("x-agent-fingerprint") or "",
-                agent.identity_fingerprint,
-            ):
-                raise HTTPException(status_code=403, detail="AGENT_IDENTITY_MISMATCH")
-            return
-        try:
-            verify_agent_request(
-                certificate_pem=agent.identity_certificate,
-                expected_fingerprint=agent.identity_fingerprint,
-                method=request.method,
-                target=request_target(request.url.path, request.url.query),
-                body=await request.body(),
-                headers=headers,
-                replay_cache=app.state.agent_request_replay_cache,
-            )
-        except AgentRequestAuthError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        agent.metadata_json = {**metadata, "request_signing_required": True}
-
     @app.get("/v1/health", response_model=HealthResponse, include_in_schema=False)
     def health(request: Request) -> HealthResponse:
         if any(request.headers.get(name) for name in PROXY_IDENTITY_HEADERS):
@@ -612,15 +500,19 @@ def create_app() -> FastAPI:
     def reachability() -> dict:
         return {"reachable": True}
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon() -> Response:
+        return Response(status_code=307, headers={"Location": "/assets/perimetr-icon.png?v=7e7edac3"})
+
     @app.get("/assets/{name}", include_in_schema=False)
     def public_asset(name: str, request: Request, db: Session = Depends(get_db)) -> Response:
-        allowed = {"unified.css", "space-grotesk.woff2", "exact-key.js", "core.css", "core.js", "operator.js"}
+        allowed = {"unified.css", "space-grotesk.woff2", "exact-key.js", "core.css", "core.js", "operator.js", "perimetr-icon.png"}
         if name not in allowed:
             raise HTTPException(404, "not_found")
         if name in {"core.css", "core.js", "operator.js"}:
             require_core_access(request, request.cookies.get(PERIMETR_SESSION_ID_COOKIE), request.cookies.get(PERIMETR_SESSION_KEY_COOKIE), db)
         return FileResponse(Path(__file__).resolve().parents[1] / "static" / name,
-                            media_type="text/css" if name.endswith(".css") else "application/javascript" if name.endswith(".js") else "font/woff2")
+                            media_type="text/css" if name.endswith(".css") else "application/javascript" if name.endswith(".js") else "image/png" if name.endswith(".png") else "font/woff2")
 
     @app.get("/v1/status", response_model=StatusResponse)
     def status(_: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> StatusResponse:
@@ -853,7 +745,6 @@ def create_app() -> FastAPI:
         public_id = obj.entity_id
         for linked_subject in list(obj.subjects):
             linked_subject.object_id = None
-        db.execute(delete(AgentAssignment).where(AgentAssignment.block_type == "object", AgentAssignment.block_id == public_id))
         _remove_correlation_block(db, f"object_{public_id}")
         db.delete(obj)
         audit(db, actor_type="perimetr", actor_id="core", action="object.deleted", target_type="object", target_id=public_id)
@@ -1233,7 +1124,6 @@ def create_app() -> FastAPI:
             ):
                 if identifier_value and not db.scalar(select(PodDenylist).where(PodDenylist.identifier_type == identifier_type, PodDenylist.identifier_value == identifier_value)):
                     db.add(PodDenylist(pod_id=pod.id, subject_id=subject.id, identifier_type=identifier_type, identifier_value=identifier_value, reason="subject_deleted"))
-        db.execute(delete(AgentAssignment).where(AgentAssignment.block_type == "subject", AgentAssignment.block_id == public_id))
         db.execute(delete(LaunchAuthorization).where(LaunchAuthorization.subject_id == subject.id))
         db.execute(delete(SessionLease).where(SessionLease.subject_id == subject.id))
         if pod_ids:
@@ -1359,6 +1249,7 @@ def create_app() -> FastAPI:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />
   <title>{title} - Web Subject</title>
+  <link rel="icon" type="image/png" sizes="1254x1254" href="/assets/perimetr-icon.png?v=7e7edac3" />
   <style>
     :root {{ --dark:#000000; --light:#ffffff; --accent:#00a8ff; --line:color-mix(in srgb, var(--light) 50%, transparent); --line-mid:color-mix(in srgb, var(--light) 75%, transparent); --line-outer:var(--light); }}
     * {{ box-sizing: border-box; }}
@@ -1790,704 +1681,6 @@ def create_app() -> FastAPI:
         db.commit()
         db.refresh(pod)
         return pod
-
-    def _assignment_payload(db: Session, assignment: AgentAssignment) -> AgentAssignmentRead:
-        return AgentAssignmentRead(
-            id=assignment.id,
-            agent_id=assignment.agent_id,
-            block_id=assignment.block_id,
-            block_type=assignment.block_type,
-            position=assignment.position,
-            created_by=assignment.created_by,
-            created_at=assignment.created_at,
-            updated_at=assignment.updated_at,
-            agent=AgentControlRead(**summarize_agent(db, assignment.agent)) if assignment.agent else None,
-        )
-
-    @app.get("/api/blocks/{block_id}/agents", response_model=list[AgentAssignmentRead])
-    def list_block_agents(
-        block_id: str,
-        block_type: str = Query(...),
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> list[AgentAssignmentRead]:
-        normalized = normalize_agent_block_type(block_type)
-        assignments = db.scalars(
-            select(AgentAssignment)
-            .where(AgentAssignment.block_id == block_id, AgentAssignment.block_type == normalized)
-            .order_by(AgentAssignment.position.asc(), AgentAssignment.created_at.asc())
-        ).all()
-        return [_assignment_payload(db, item) for item in assignments]
-
-    @app.post("/api/blocks/{block_id}/agents", response_model=AgentAssignmentRead, status_code=201)
-    def add_block_agent(
-        block_id: str,
-        payload: AgentAssignmentCreate,
-        block_type: str = Query(...),
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> AgentAssignmentRead:
-        assignment = assign_agent_to_block(db, agent_id=payload.agent_id, block_type=block_type, block_id=block_id, created_by=payload.created_by)
-        audit(db, actor_type="perimetr", actor_id=payload.created_by, action="agent.assigned", target_type="agent", target_id=payload.agent_id, payload={"block_id": block_id, "block_type": block_type})
-        db.commit()
-        db.refresh(assignment)
-        return _assignment_payload(db, assignment)
-
-    @app.delete("/api/blocks/{block_id}/agents/{agent_id}")
-    def remove_block_agent(
-        block_id: str,
-        agent_id: str,
-        block_type: str = Query(...),
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        unassign_agent_from_block(db, agent_id=agent_id, block_type=block_type, block_id=block_id)
-        audit(db, actor_type="perimetr", actor_id="operator", action="agent.unassigned", target_type="agent", target_id=agent_id, payload={"block_id": block_id, "block_type": block_type}, result={"server_agent_removed": False, "sindri_removed": False})
-        db.commit()
-        return {"removed": True, "revoke_sent": False}
-
-    @app.post("/api/blocks/{block_id}/agents/reorder")
-    def reorder_agents(
-        block_id: str,
-        payload: AgentReorderRequest,
-        block_type: str = Query(...),
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        reorder_block_agents(db, block_type=block_type, block_id=block_id, ordered_agent_ids=payload.ordered_agent_ids)
-        audit(db, actor_type="perimetr", actor_id="operator", action="agent.assignments.reordered", target_type="block", target_id=block_id, payload={"block_type": block_type, "ordered_agent_ids": payload.ordered_agent_ids})
-        db.commit()
-        return {"reordered": True}
-
-    @app.get("/api/agents/library", response_model=list[AgentControlRead])
-    def list_agent_library(
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> list[AgentControlRead]:
-        agents = db.scalars(select(Agent).order_by(Agent.library_position.asc(), Agent.created_at.asc())).all()
-        return [AgentControlRead(**summarize_agent(db, agent)) for agent in agents]
-
-    @app.post("/api/agents/reorder")
-    def reorder_agent_library(
-        payload: AgentReorderRequest,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> dict:
-        agents = db.scalars(select(Agent)).all()
-        by_id = {agent.id: agent for agent in agents}
-        if set(payload.ordered_agent_ids) != set(by_id):
-            raise HTTPException(status_code=400, detail="AGENT_LIBRARY_ORDER_MISMATCH")
-        for position, agent_id in enumerate(payload.ordered_agent_ids):
-            by_id[agent_id].library_position = position
-        audit(db, actor_type="perimetr", actor_id="operator", action="agent.library.reordered", target_type="agent_library", target_id=PERIMETR_SYSTEM_ENTITY_ID, payload={"ordered_agent_ids": payload.ordered_agent_ids})
-        db.commit()
-        return {"reordered": True}
-
-    @app.post("/api/agents/enroll", response_model=AgentControlRead, status_code=201)
-    def enroll_agent(
-        payload: AgentEnrollRequest,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> AgentControlRead:
-        existing = db.get(Agent, payload.agent_id)
-        denied = db.scalar(
-            select(CertificateDenylist).where(
-                (CertificateDenylist.agent_id == payload.agent_id)
-                | (CertificateDenylist.fingerprint_sha256 == payload.identity_fingerprint)
-                | (
-                    (CertificateDenylist.serial_number != "")
-                    & (CertificateDenylist.serial_number == (payload.certificate_serial or ""))
-                )
-            )
-        )
-        if denied or (existing and existing.enrollment_state == "revoked"):
-            raise HTTPException(status_code=409, detail="AGENT_REVOKED")
-        base_url = payload.api_base_url or f"https://{payload.domain}:{payload.port}"
-        remote_enrollment = None
-        if payload.enrollment_token:
-            settings = get_settings()
-            controller_identity = ensure_controller_signing_material(
-                db, settings, PERIMETR_SYSTEM_ENTITY_ID
-            )
-            heartbeat_endpoint = (
-                f"{settings.perimetr_public_url.rstrip('/')}"
-                f"/api/agents/{payload.agent_id}/heartbeat"
-            )
-            try:
-                remote_enrollment = enroll_remote_agent(
-                    base_url=base_url,
-                    agent_id=payload.agent_id,
-                    enrollment_token=payload.enrollment_token,
-                    expected_fingerprint=payload.identity_fingerprint,
-                    controller_id=PERIMETR_SYSTEM_ENTITY_ID,
-                    controller_certificate_pem=controller_identity.certificate_pem,
-                    heartbeat_endpoint=heartbeat_endpoint,
-                    timeout_seconds=settings.perimetr_agent_request_timeout_sec,
-                )
-            except AgentTransportError as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"AGENT_ENROLLMENT_FAILED: {exc}",
-                ) from exc
-        agent = existing or Agent(
-            id=payload.agent_id,
-            name=payload.display_name,
-            agent_type="agent",
-            host_id=payload.domain,
-            identity_fingerprint=payload.identity_fingerprint,
-            api_base_url=base_url,
-        )
-        if existing is None:
-            last_position = db.scalar(select(func.max(Agent.library_position)))
-            agent.library_position = (last_position if last_position is not None else -1) + 1
-            db.add(agent)
-        agent.name = payload.display_name
-        agent.display_name = payload.display_name
-        agent.domain = payload.domain
-        agent.port = payload.port
-        agent.host_id = payload.domain
-        agent.api_base_url = base_url
-        previous_fingerprint = agent.identity_fingerprint
-        if existing and previous_fingerprint and previous_fingerprint != payload.identity_fingerprint:
-            previous_certificate = db.scalar(
-                select(AgentCertificate).where(
-                    AgentCertificate.agent_id == agent.id,
-                    AgentCertificate.fingerprint_sha256 == previous_fingerprint,
-                )
-            )
-            if previous_certificate:
-                previous_certificate.status = "rotated"
-        agent.identity_fingerprint = (
-            remote_enrollment["fingerprint_sha256"]
-            if remote_enrollment
-            else payload.identity_fingerprint
-        )
-        agent.identity_certificate = (
-            remote_enrollment["identity_certificate_pem"]
-            if remote_enrollment
-            else payload.identity_certificate
-        )
-        agent.certificate_serial = (
-            remote_enrollment["certificate_serial"]
-            if remote_enrollment
-            else payload.certificate_serial
-        )
-        if remote_enrollment:
-            agent.certificate_valid_not_before = remote_enrollment["certificate_valid_not_before"]
-            agent.certificate_valid_not_after = remote_enrollment["certificate_valid_not_after"]
-        agent.enrollment_state = "enrolled"
-        agent.status = "OFFLINE"
-        agent.agent_version = (
-            remote_enrollment.get("agent_version") or payload.agent_version
-            if remote_enrollment
-            else payload.agent_version
-        )
-        agent.sindri_version = (
-            remote_enrollment.get("sindri_version") or payload.sindri_version
-            if remote_enrollment
-            else payload.sindri_version
-        )
-        agent.sindri_protocol_version = (
-            remote_enrollment.get("sindri_protocol_version") or payload.sindri_protocol_version
-            if remote_enrollment
-            else payload.sindri_protocol_version
-        )
-        agent.tags = payload.tags
-        agent.environment = payload.environment
-        agent.notes = payload.notes
-        agent.metadata_json = {
-            **(agent.metadata_json or {}),
-            "remote_enrolled": bool(remote_enrollment),
-            "controller_id": PERIMETR_SYSTEM_ENTITY_ID if remote_enrollment else "",
-            "request_signing_required": bool(
-                remote_enrollment
-                and remote_enrollment.get("request_auth") == "ecdsa-p256-sha256-v1"
-            ),
-        }
-        db.flush()
-        certificate = db.scalar(
-            select(AgentCertificate).where(
-                AgentCertificate.agent_id == agent.id,
-                AgentCertificate.fingerprint_sha256 == agent.identity_fingerprint,
-            )
-        )
-        if certificate is None:
-            db.add(
-                AgentCertificate(
-                    agent_id=agent.id,
-                    fingerprint_sha256=agent.identity_fingerprint,
-                    serial_number=agent.certificate_serial or "",
-                    certificate_pem=agent.identity_certificate,
-                    valid_not_before=agent.certificate_valid_not_before,
-                    valid_not_after=agent.certificate_valid_not_after,
-                    status="active",
-                )
-            )
-        endpoint = db.scalar(select(AgentEndpoint).where(AgentEndpoint.agent_id == agent.id))
-        if endpoint is None:
-            endpoint = AgentEndpoint(agent_id=agent.id, domain=payload.domain, port=payload.port, base_url=base_url)
-            db.add(endpoint)
-        else:
-            endpoint.domain = payload.domain
-            endpoint.port = payload.port
-            endpoint.base_url = base_url
-            endpoint.status = "active"
-        capabilities = (
-            list(remote_enrollment.get("capabilities") or payload.capabilities)
-            if remote_enrollment
-            else payload.capabilities
-        )
-        upsert_agent_capabilities(db, agent.id, capabilities)
-        audit(
-            db,
-            actor_type="perimetr",
-            actor_id="operator",
-            action="agent.enrolled",
-            target_type="agent",
-            target_id=agent.id,
-            payload={
-                **payload.model_dump(mode="json", exclude={"enrollment_token"}),
-                "enrollment_token": "[redacted]" if payload.enrollment_token else "",
-            },
-            result={
-                "state": agent.enrollment_state,
-                "remote_enrolled": bool(remote_enrollment),
-            },
-        )
-        db.commit()
-        db.refresh(agent)
-        return AgentControlRead(**summarize_agent(db, agent))
-
-    @app.get("/api/agents/{agent_id}", response_model=AgentControlRead)
-    def read_agent_control(agent_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> AgentControlRead:
-        return AgentControlRead(**summarize_agent(db, find_agent(db, agent_id)))
-
-    @app.patch("/api/agents/{agent_id}", response_model=AgentControlRead)
-    def update_agent_control(
-        agent_id: str,
-        payload: AgentUpdateRequest,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> AgentControlRead:
-        agent = find_agent(db, agent_id)
-        data = payload.model_dump(exclude_none=True)
-        if "display_name" in data:
-            agent.display_name = data["display_name"]
-            agent.name = data["display_name"]
-        if "tags" in data:
-            agent.tags = data["tags"]
-        if "environment" in data:
-            agent.environment = data["environment"]
-        if "notes" in data:
-            agent.notes = data["notes"]
-        audit(db, actor_type="perimetr", actor_id="operator", action="agent.metadata.updated", target_type="agent", target_id=agent.id, payload=data)
-        db.commit()
-        db.refresh(agent)
-        return AgentControlRead(**summarize_agent(db, agent))
-
-    @app.delete("/api/agents/{agent_id}")
-    def delete_agent_control(agent_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
-        agent = find_agent(db, agent_id)
-        denied = db.scalar(select(CertificateDenylist).where(CertificateDenylist.fingerprint_sha256 == agent.identity_fingerprint))
-        if denied is None:
-            db.add(CertificateDenylist(
-                agent_id=agent.id,
-                fingerprint_sha256=agent.identity_fingerprint,
-                serial_number=agent.certificate_serial or "",
-                reason="agent_deleted_from_perimetr",
-            ))
-        dependent_models = [
-            ApprovalDecision, ApprovalRequest, JobResult, JobEvent, AgentJob,
-            AgentCommand, SessionLease, RevocationRecord, AgentStateEvent,
-            AgentHeartbeat, AgentCapability, AgentCertificate, AgentEndpoint,
-            AgentAssignment,
-        ]
-        for model in dependent_models:
-            db.execute(delete(model).where(model.agent_id == agent.id))
-        public_id = agent.id
-        db.delete(agent)
-        audit(db, actor_type="perimetr", actor_id="operator", action="agent.deleted", target_type="agent", target_id=public_id, result={"server_agent_removed": False, "identity_denylisted": True})
-        db.commit()
-        return {"deleted": True, "id": public_id, "server_agent_removed": False}
-
-    @app.get("/api/agents/{agent_id}/capabilities")
-    def list_agent_capabilities(agent_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
-        find_agent(db, agent_id)
-        capabilities = db.scalars(select(AgentCapability).where(AgentCapability.agent_id == agent_id).order_by(AgentCapability.group.asc(), AgentCapability.action.asc())).all()
-        return {"items": [{"action": item.action, "title": item.title, "description": item.description, "group": item.group, "risk": item.risk, "inputs": item.inputs, "available": item.available} for item in capabilities]}
-
-    @app.post("/api/agents/{agent_id}/heartbeat")
-    async def receive_agent_heartbeat(
-        agent_id: str,
-        payload: AgentControlHeartbeatRequest,
-        request: Request,
-        db: Session = Depends(get_db),
-    ) -> dict:
-        agent = find_agent(db, agent_id)
-        if agent.enrollment_state == "revoked" or db.scalar(
-            select(CertificateDenylist).where(CertificateDenylist.agent_id == agent_id)
-        ):
-            raise HTTPException(status_code=403, detail="AGENT_REVOKED")
-        if payload.agent_id != agent.id:
-            raise HTTPException(status_code=400, detail="AGENT_ID_MISMATCH")
-        await require_agent_callback_authentication(request, agent)
-        heartbeat = apply_agent_heartbeat(db, agent=agent, payload=payload.model_dump(mode="python"))
-        db.commit()
-        return {"accepted": True, "heartbeat_id": heartbeat.id, "status": visible_agent_status(agent)}
-
-    @app.post("/api/agents/{agent_id}/jobs", response_model=AgentJobRead, status_code=201)
-    def create_control_job(
-        agent_id: str,
-        payload: AgentJobCreate,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> AgentJob:
-        agent = find_agent(db, agent_id)
-        job = create_agent_job(db, agent=agent, action=payload.action, inputs=payload.inputs, created_by=payload.created_by, expires_at=payload.expires_at)
-        audit(
-            db,
-            actor_type="perimetr",
-            actor_id=payload.created_by,
-            action="agent.job.created",
-            target_type="job",
-            target_id=job.job_id,
-            payload={
-                "action": payload.action,
-                "inputs": job.inputs,
-                "created_by": payload.created_by,
-                "expires_at": (
-                    payload.expires_at.isoformat()
-                    if payload.expires_at
-                    else None
-                ),
-            },
-            result={"agent_id": agent.id, "status": job.status},
-        )
-        db.commit()
-        db.refresh(job)
-        if (agent.metadata_json or {}).get("remote_enrolled"):
-            try:
-                controller_identity = ensure_controller_signing_material(
-                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
-                )
-                dispatch_remote_agent_job(
-                    base_url=agent.api_base_url,
-                    controller_id=PERIMETR_SYSTEM_ENTITY_ID,
-                    timeout_seconds=get_settings().perimetr_agent_request_timeout_sec,
-                    job_id=job.job_id,
-                    request_id=job.request_id,
-                    action=job.action,
-                    inputs=payload.inputs,
-                    created_at=job.created_at,
-                    expires_at=job.expires_at,
-                    controller_private_key_pem=controller_identity.private_key_pem,
-                )
-                record_job_event(
-                    db,
-                    agent_id=agent.id,
-                    job_id=job.job_id,
-                    event_type="job.dispatched",
-                    status=job.status,
-                )
-                audit(
-                    db,
-                    actor_type="perimetr",
-                    actor_id=payload.created_by,
-                    action="agent.job.dispatched",
-                    target_type="job",
-                    target_id=job.job_id,
-                    result={"agent_id": agent.id},
-                )
-                db.commit()
-                db.refresh(job)
-            except AgentTransportError as exc:
-                job.status = "DELIVERY_FAILED"
-                job.error = {"code": "AGENT_DELIVERY_FAILED", "message": str(exc)}
-                record_job_event(
-                    db,
-                    agent_id=agent.id,
-                    job_id=job.job_id,
-                    event_type="job.delivery_failed",
-                    status=job.status,
-                    message=str(exc),
-                )
-                db.commit()
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"AGENT_JOB_DELIVERY_FAILED: {exc}",
-                ) from exc
-        return job
-
-    @app.get("/api/agents/{agent_id}/jobs", response_model=list[AgentJobRead])
-    def list_control_jobs(agent_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> list[AgentJob]:
-        find_agent(db, agent_id)
-        return db.scalars(select(AgentJob).where(AgentJob.agent_id == agent_id).order_by(AgentJob.created_at.desc())).all()
-
-    @app.get("/api/agents/{agent_id}/jobs/{job_id}", response_model=AgentJobRead)
-    def read_control_job(agent_id: str, job_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> AgentJob:
-        return get_agent_job(db, agent_id, job_id)
-
-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/events", response_model=JobEventRead)
-    async def ingest_job_event(
-        agent_id: str,
-        job_id: str,
-        payload: dict,
-        request: Request,
-        db: Session = Depends(get_db),
-    ) -> JobEvent:
-        agent = find_agent(db, agent_id)
-        await require_agent_callback_authentication(request, agent)
-        event = apply_agent_job_event(db, agent_id=agent_id, job_id=job_id, payload=payload)
-        db.commit()
-        db.refresh(event)
-        return event
-
-    @app.get("/api/agents/{agent_id}/jobs/{job_id}/events", response_model=list[JobEventRead])
-    def list_job_events(agent_id: str, job_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> list[JobEvent]:
-        get_agent_job(db, agent_id, job_id)
-        return db.scalars(select(JobEvent).where(JobEvent.agent_id == agent_id, JobEvent.job_id == job_id).order_by(JobEvent.sequence.asc())).all()
-
-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/approve")
-    def approve_job(agent_id: str, job_id: str, payload: ApprovalDecisionRequest, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
-        agent = find_agent(db, agent_id)
-        decision = decide_approval(db, agent_id=agent_id, job_id=job_id, approval_id=payload.approval_id, plan_hash=payload.plan_hash, decision="approved", actor=payload.decided_by)
-        audit(db, actor_type="perimetr", actor_id=payload.decided_by, action="agent.job.approved", target_type="job", target_id=job_id, payload=payload.model_dump(mode="json"))
-        forwarded = False
-        if (agent.metadata_json or {}).get("remote_enrolled"):
-            try:
-                controller_identity = ensure_controller_signing_material(
-                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
-                )
-                decide_remote_agent_job(
-                    base_url=agent.api_base_url,
-                    controller_id=PERIMETR_SYSTEM_ENTITY_ID,
-                    timeout_seconds=get_settings().perimetr_agent_request_timeout_sec,
-                    job_id=job_id,
-                    decision="approved",
-                    approval_id=payload.approval_id,
-                    plan_hash=payload.plan_hash,
-                    confirmation_phrase=payload.confirmation_phrase,
-                    hostname_confirmation=payload.hostname_confirmation,
-                    controller_private_key_pem=controller_identity.private_key_pem,
-                )
-                forwarded = True
-            except AgentTransportError as exc:
-                db.rollback()
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"AGENT_APPROVAL_FORWARD_FAILED: {exc}",
-                ) from exc
-        db.commit()
-        return {"decision": decision.decision, "forward_to_agent": forwarded}
-
-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/reject")
-    def reject_job(agent_id: str, job_id: str, payload: ApprovalDecisionRequest, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
-        agent = find_agent(db, agent_id)
-        decision = decide_approval(db, agent_id=agent_id, job_id=job_id, approval_id=payload.approval_id, plan_hash=payload.plan_hash, decision="rejected", actor=payload.decided_by)
-        audit(db, actor_type="perimetr", actor_id=payload.decided_by, action="agent.job.rejected", target_type="job", target_id=job_id, payload=payload.model_dump(mode="json"))
-        forwarded = False
-        if (agent.metadata_json or {}).get("remote_enrolled"):
-            try:
-                controller_identity = ensure_controller_signing_material(
-                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
-                )
-                decide_remote_agent_job(
-                    base_url=agent.api_base_url,
-                    controller_id=PERIMETR_SYSTEM_ENTITY_ID,
-                    timeout_seconds=get_settings().perimetr_agent_request_timeout_sec,
-                    job_id=job_id,
-                    decision="rejected",
-                    approval_id=payload.approval_id,
-                    plan_hash=payload.plan_hash,
-                    controller_private_key_pem=controller_identity.private_key_pem,
-                )
-                forwarded = True
-            except AgentTransportError as exc:
-                db.rollback()
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"AGENT_REJECTION_FORWARD_FAILED: {exc}",
-                ) from exc
-        db.commit()
-        return {"decision": decision.decision, "forward_to_agent": forwarded}
-
-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/cancel")
-    def cancel_job(agent_id: str, job_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
-        agent = find_agent(db, agent_id)
-        job = get_agent_job(db, agent_id, job_id)
-        if job.status == "RUNNING":
-            raise HTTPException(status_code=409, detail="CANCEL_NOT_SAFE")
-        job.status = "CANCELLED"
-        job.canceller = "operator"
-        record_job_event(db, agent_id=agent_id, job_id=job_id, event_type="job.cancelled", status="CANCELLED")
-        audit(db, actor_type="perimetr", actor_id="operator", action="agent.job.cancelled", target_type="job", target_id=job_id)
-        forwarded = False
-        if (agent.metadata_json or {}).get("remote_enrolled"):
-            try:
-                controller_identity = ensure_controller_signing_material(
-                    db, get_settings(), PERIMETR_SYSTEM_ENTITY_ID
-                )
-                cancel_remote_agent_job(
-                    base_url=agent.api_base_url,
-                    controller_id=PERIMETR_SYSTEM_ENTITY_ID,
-                    timeout_seconds=get_settings().perimetr_agent_request_timeout_sec,
-                    job_id=job_id,
-                    controller_private_key_pem=controller_identity.private_key_pem,
-                )
-                forwarded = True
-            except AgentTransportError as exc:
-                db.rollback()
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"AGENT_CANCEL_FORWARD_FAILED: {exc}",
-                ) from exc
-        db.commit()
-        return {"cancelled": True, "forward_to_agent": forwarded}
-
-    def serialize_approval(db: Session, approval: ApprovalRequest) -> dict:
-        job = get_agent_job(db, approval.agent_id, approval.job_id)
-        agent = find_agent(db, approval.agent_id)
-        return {
-            "id": approval.id,
-            "agent_id": approval.agent_id,
-            "job_id": approval.job_id,
-            "approval_id": approval.approval_id,
-            "plan_hash": approval.plan_hash,
-            "risk": approval.risk,
-            "warning": approval.warning,
-            "plan": approval.plan,
-            "expires_at": approval.expires_at,
-            "status": approval.status,
-            "action": job.action,
-            "hostname": agent.hostname or agent.domain or "",
-            "created_at": approval.created_at,
-            "updated_at": approval.updated_at,
-        }
-
-    @app.get("/api/agents/{agent_id}/approvals", response_model=list[ApprovalRequestRead])
-    def list_agent_approvals(agent_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> list[dict]:
-        find_agent(db, agent_id)
-        approvals = db.scalars(
-            select(ApprovalRequest)
-            .where(ApprovalRequest.agent_id == agent_id)
-            .order_by(ApprovalRequest.created_at.desc())
-        ).all()
-        return [serialize_approval(db, approval) for approval in approvals]
-
-    @app.get("/api/approvals/pending", response_model=list[ApprovalRequestRead])
-    def list_pending_approvals(
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> list[dict]:
-        approvals = db.scalars(
-            select(ApprovalRequest)
-            .where(ApprovalRequest.status == "PENDING")
-            .order_by(ApprovalRequest.created_at.asc())
-        ).all()
-        return [serialize_approval(db, approval) for approval in approvals]
-
-    @app.post("/api/agents/{agent_id}/revoke")
-    def prepare_agent_revoke(agent_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> dict:
-        agent = find_agent(db, agent_id)
-        plan = [
-            "Stop accepting new jobs",
-            "Cancel queued jobs",
-            "Revoke Agent identity",
-            "Remove Agent Node service",
-            "Remove Agent Node files",
-            "Close Agent Node firewall port if owned by installer and safe",
-        ]
-        record = db.scalar(select(RevocationRecord).where(RevocationRecord.agent_id == agent.id, RevocationRecord.status == "prepared"))
-        if record is None:
-            record = RevocationRecord(agent_id=agent.id, certificate_fingerprint_sha256=agent.identity_fingerprint, certificate_serial=agent.certificate_serial or "", payload={"plan": plan})
-            db.add(record)
-        denied = db.scalar(select(CertificateDenylist).where(CertificateDenylist.fingerprint_sha256 == agent.identity_fingerprint))
-        if denied is None:
-            db.add(CertificateDenylist(agent_id=agent.id, fingerprint_sha256=agent.identity_fingerprint, serial_number=agent.certificate_serial or "", reason="agent_revoke_prepared"))
-        else:
-            denied.agent_id = agent.id
-        audit(db, actor_type="perimetr", actor_id="operator", action="agent.revoke.prepared", target_type="agent", target_id=agent.id, result={"plan": plan})
-        db.commit()
-        return {"status": "approval_required", "action": "agent.revoke", "plan": plan, "agent_id": agent.id}
-
-    @app.post("/v1/agents/register", response_model=AgentRead, status_code=201)
-    def register_agent(
-        payload: AgentRegisterRequest,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> Agent:
-        existing = db.scalar(select(Agent).where(Agent.host_id == payload.host_id, Agent.identity_fingerprint == payload.identity_fingerprint))
-        if existing:
-            raise HTTPException(status_code=409, detail="agent already registered")
-        agent = Agent(
-            name=payload.name,
-            agent_type=payload.agent_type.value,
-            host_id=payload.host_id,
-            status="registered",
-            identity_fingerprint=payload.identity_fingerprint,
-            api_base_url=payload.api_base_url,
-        )
-        db.add(agent)
-        db.flush()
-        audit(db, actor_type="agent", actor_id=agent.id, action="agent.registered", target_type="agent", target_id=agent.id, payload=payload.model_dump(mode="json"), result={"status": agent.status})
-        db.commit()
-        db.refresh(agent)
-        return agent
-
-    @app.post("/v1/agents/{agent_id}/heartbeat", response_model=AgentRead)
-    def heartbeat_agent(
-        agent_id: str,
-        payload: AgentHeartbeatRequest,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> Agent:
-        agent = get_agent(db, agent_id)
-        agent.status = payload.status
-        agent.last_heartbeat_at = payload.observed_at
-        audit(db, actor_type="agent", actor_id=agent.id, action="agent.heartbeat", target_type="agent", target_id=agent.id, payload=payload.model_dump(mode="json"), result={"status": agent.status})
-        db.commit()
-        db.refresh(agent)
-        return agent
-
-    @app.get("/v1/agents", response_model=list[AgentRead])
-    def list_agents(_: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> list[Agent]:
-        return db.scalars(select(Agent).order_by(Agent.created_at.desc())).all()
-
-    @app.post("/v1/agents/{agent_id}/commands", response_model=AgentCommandRead, status_code=201)
-    def create_agent_command(agent_id: str, payload: AgentCommandCreate, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> AgentCommand:
-        agent = get_agent(db, agent_id)
-        ensure_allowed_agent_command(payload.command)
-        command = AgentCommand(agent_id=agent.id, command=payload.command, target=payload.target, params=payload.params)
-        db.add(command)
-        db.flush()
-        audit(db, actor_type="perimetr", actor_id="core", action="agent.command.queued", target_type="agent_command", target_id=command.id, payload=payload.model_dump(mode="json"), result={"status": command.status})
-        db.commit()
-        db.refresh(command)
-        return command
-
-    @app.get("/v1/agents/{agent_id}/commands/pending", response_model=list[AgentCommandRead])
-    def list_pending_commands(agent_id: str, _: SessionLease = Depends(require_core_access), db: Session = Depends(get_db)) -> list[AgentCommand]:
-        get_agent(db, agent_id)
-        return list_pending_agent_commands(db, agent_id)
-
-    @app.post("/v1/agents/{agent_id}/commands/{command_id}/status", response_model=AgentCommandRead)
-    def update_agent_command(
-        agent_id: str,
-        command_id: str,
-        payload: AgentCommandStatusUpdate,
-        _: SessionLease = Depends(require_core_access),
-        db: Session = Depends(get_db),
-    ) -> AgentCommand:
-        get_agent(db, agent_id)
-        command = get_command(db, command_id)
-        if command.agent_id != agent_id:
-            raise HTTPException(status_code=404, detail="command does not belong to agent")
-        previous_status = command.status
-        update_agent_command_status(db, command, status=payload.status, result=payload.result)
-        audit(db, actor_type="agent", actor_id=agent_id, action=f"agent.command.{payload.status}", target_type="agent_command", target_id=command.id, payload=payload.model_dump(mode="json"), result={"previous_status": previous_status, "status": command.status})
-        db.commit()
-        db.refresh(command)
-        return command
 
     @app.get("/v1/audit", response_model=list[AuditRead])
     def list_audit_events(

@@ -7,20 +7,21 @@ def render(error: str | None = None, accent: str = "#00A8FF") -> str:
     return r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow,noarchive,nosnippet"><title>perimetr</title>
+<link rel="icon" type="image/png" sizes="1254x1254" href="/assets/perimetr-icon.png?v=7e7edac3">
 <link rel="stylesheet" href="/assets/unified.css"><style>
 :root{--accent:__ACCENT__} body{min-height:100vh;display:grid;place-items:center;margin:0;padding:24px}
 .login-shell{width:min(560px,100%)} .login-brand{height:100px;display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
 .login-brand h1{font:700 clamp(48px,8vw,72px)/1 "Space Grotesk","Segoe UI",sans-serif;color:var(--accent);margin:0}
-.login-mark{width:80px;height:80px;color:var(--accent)} .login-panel{border:1px solid var(--white);padding:22px 24px 26px;min-height:268px}
-.reachability{display:flex;align-items:center;justify-content:space-between;gap:12px;width:min(255px,100%);min-height:50px;border:1px solid var(--line-inner);padding:12px;margin-bottom:48px}
+.login-mark{width:100px;height:100px;object-fit:contain;flex:none} .login-panel{border:1px solid var(--white);padding:21px 24px 25px;min-height:268px}
+.reachability{display:flex;align-items:center;justify-content:space-between;gap:12px;width:min(255px,100%);min-height:50px;border:1px solid var(--line-inner);padding:12px;margin-bottom:55px}
 .status-square{width:18px;height:18px;background:currentColor;flex:none}.reachable{color:var(--success);border-color:color-mix(in srgb,var(--success) 80%,transparent)}
 .reachable .status-square{animation:reachability 2s ease-in-out infinite}.unreachable{color:var(--danger)}
 @keyframes reachability{50%{opacity:.45}} .access-key-wrapper{min-height:44px;display:flex;align-items:center}
 #accessKey{height:31px;min-height:31px;width:100%} .login-panel button{width:100%;min-height:50px;margin-top:20px}
-.login-error{color:var(--danger);margin-top:12px;overflow-wrap:anywhere}.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
-@media(prefers-reduced-motion:reduce){.reachable .status-square{animation:none}}
+.login-error:empty{display:none}.login-error{color:var(--danger);margin-top:12px;overflow-wrap:anywhere}.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+@media(prefers-reduced-motion:reduce){.reachable .status-square{animation:reachability 2s ease-in-out infinite}}
 </style></head><body><main class="login-shell">
-<header class="login-brand"><h1>perimetr</h1><svg class="login-mark" viewBox="0 0 80 80" aria-hidden="true"><path d="M8 8h64v64H8z M20 20h40v40H20z M32 32h16v16H32z" fill="none" stroke="currentColor" stroke-width="2"/></svg></header>
+<header class="login-brand"><h1 class="login-wordmark">perimetr</h1><img class="login-mark" src="/assets/perimetr-icon.png?v=7e7edac3" width="100" height="100" alt="" draggable="false"></header>
 <form class="login-panel" id="loginForm">
 <div id="reachability" class="reachability" role="status"><span id="reachabilityText">Checking service…</span><span class="status-square" aria-hidden="true"></span></div>
 <label class="visually-hidden" for="accessKey">Access Key</label><div class="access-key-wrapper"><input id="accessKey" type="password" name="access_key" placeholder="Access Key…" autocomplete="current-password" autocapitalize="none" spellcheck="false" required></div>

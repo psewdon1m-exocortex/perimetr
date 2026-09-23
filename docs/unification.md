@@ -1,5 +1,8 @@
 # Perimetr unification work record
 
+The 2026-09-20 visual correction is recorded in [interface.md](interface.md).
+Its measured Part 01 component tests extend the earlier local verification below.
+
 Authority: [Part 00](https://github.com/psewdon1m-exocortex/general/blob/8737b50f0aca4b84f4fa223272bdfb63ade05d33/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
 and the applicable Parts listed below. Started 2026-09-19 against central
 documentation commit `8737b50` and its current working tree. Perimetr baseline
@@ -14,9 +17,12 @@ migration for retained state and no silent compatibility bypass. This is
 authorization for local implementation and verification, not a claim that a
 release is published or a production deployment has been qualified.
 
-Perimetr remains the owner of Objects, Subjects, Properties/correlations, Pod
-provisioning/identities, Agent Node assignments/jobs/approvals and controller
-identity. Changes must preserve these functions and trust continuity.
+Perimetr remains the owner of Objects, Subjects, Properties/correlations and Pod
+provisioning/identities. The subsequent operator request removes the entire
+server Agent Node control plane, superseding its earlier inclusion in this scope.
+Migration `0007` removes its persistent state; backup v4 covers the remaining nine
+authoritative tables. Remote servers receive no uninstall or revoke requests.
+The existing audit history and Pod/Updater contracts are retained.
 
 ## Applicability and baseline
 
@@ -108,7 +114,7 @@ and irreversible boundaries are documented with the implementation below.
 ## Implemented contracts
 
 Identity/settings code is split into operator_settings, kernel_connection,
-request_policy and the explicit 0006 migration. Backup v3 covers every authoritative
+request_policy and the explicit 0006 migration. Backup v4 covers every authoritative
 model with encrypted streaming rows, bounded full preflight, a write barrier and
 transactional replacement. Tests include wrong escrow and an insertion failure
 after deletion to verify preservation of the previous state. The old plaintext

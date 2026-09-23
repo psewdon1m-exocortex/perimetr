@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
-from app.database import Base
 from app.database_migrations import alembic_config, upgrade_database
 from app.models import SystemSetting
 from app.security import is_password_hash
-import app.models  # noqa: F401
 
 
 def sqlite_url(path: Path) -> str:
@@ -29,7 +26,7 @@ def test_empty_database_upgrades_to_numbered_head(tmp_path: Path) -> None:
         assert "objects" in tables
         assert "system_settings" in tables
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0006"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0007"
             pod_columns = {column["name"] for column in inspect(engine).get_columns("pods")}
             provisioning_columns = {
                 column["name"]
@@ -52,7 +49,10 @@ def test_existing_current_schema_is_adopted_and_plaintext_password_is_hashed(
     url = sqlite_url(path)
     engine = create_engine(url)
     try:
-        Base.metadata.create_all(engine)
+        from alembic import command
+        command.upgrade(alembic_config(url), "0001")
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE alembic_version"))
         with Session(engine) as db:
             db.add(
                 SystemSetting(
@@ -83,7 +83,7 @@ def test_existing_current_schema_is_adopted_and_plaintext_password_is_hashed(
             assert "password" not in auth
             assert is_password_hash(str(auth.get("access_key_hash") or ""))
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0006"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0007"
     finally:
         engine.dispose()
 

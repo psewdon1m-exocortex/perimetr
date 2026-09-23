@@ -58,7 +58,6 @@ class Settings(BaseSettings):
     perimetr_xray_dns_url: str = ""
     perimetr_proxy_verification_url: str = ""
     perimetr_default_pod_url: str = "about:blank"
-    perimetr_agent_request_timeout_sec: float = 10.0
     kernel_url: str = ""
     kernel_service_token: str = ""
     kernel_cache_path: str = str(Path(".tmp") / "kernel-cache" / "register.snapshot.json")

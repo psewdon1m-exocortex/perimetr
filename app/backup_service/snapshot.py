@@ -25,15 +25,11 @@ from ..pod_service import _fernet
 from ..security import is_password_hash
 from ..settings import Settings
 
-SCHEMA = "perimetr.full-backup.v3"
+SCHEMA = "perimetr.full-backup.v4"
 EXCLUDED = {"session_leases", "backup_manifests"}
 TABLE_NAMES = frozenset({
     "objects", "subjects", "access_policies", "system_settings", "pods",
-    "pod_provisioning_records", "pod_denylist", "agents", "agent_assignments",
-    "agent_endpoints", "agent_certificates", "agent_capabilities", "agent_heartbeats",
-    "agent_state_events", "jobs", "job_events", "job_results", "approval_requests",
-    "approval_decisions", "revocation_records", "certificate_denylist",
-    "controller_identity", "launch_authorizations", "agent_commands", "audit_events",
+    "pod_provisioning_records", "pod_denylist", "launch_authorizations", "audit_events",
 })
 MAX_ROW = 12 * 1024 * 1024
 
@@ -55,7 +51,7 @@ def encoded(value) -> bytes:
 
 
 def signature(manifest: dict, settings: Settings) -> str:
-    key = hashlib.sha256(("perimetr.backup.v3\0" + settings.perimetr_pod_signing_secret).encode()).digest()
+    key = hashlib.sha256(("perimetr.backup.v4\0" + settings.perimetr_pod_signing_secret).encode()).digest()
     return hmac.new(key, encoded(manifest), hashlib.sha256).hexdigest()
 
 
@@ -64,7 +60,7 @@ def build_snapshot(db: Session, settings: Settings) -> io.BytesIO:
     cipher = _fernet(settings)
     output = io.BytesIO()
     manifest = {"schema": SCHEMA, "service": "perimetr", "version": settings.perimetr_version,
-                "database_revision": "0006", "mode": "full-replace", "created_at": datetime.now(timezone.utc).isoformat(),
+                "database_revision": "0007", "mode": "full-replace", "created_at": datetime.now(timezone.utc).isoformat(),
                 "encryption": "fernet-row-v1", "recovery_dependency": "PERIMETR_POD_SIGNING_SECRET (separate escrow)",
                 "excluded": sorted(EXCLUDED), "members": {}}
     with ZipFile(output, "w", compression=ZIP_STORED) as archive:
@@ -151,7 +147,7 @@ def preflight(data: bytes, settings: Settings) -> dict:
             manifest = _json(archive.read("manifest.json"))
             if manifest.get("schema") != SCHEMA or manifest.get("mode") != "full-replace" or manifest.get("service") != "perimetr":
                 raise InvalidBackup("Unsupported backup schema or mode")
-            if manifest.get("database_revision") != "0006" or manifest.get("encryption") != "fernet-row-v1":
+            if manifest.get("database_revision") != "0007" or manifest.get("encryption") != "fernet-row-v1":
                 raise InvalidBackup("Unsupported database revision or encryption format")
             claimed = manifest.pop("authentication", "")
             if not isinstance(claimed, str) or not hmac.compare_digest(claimed, signature(manifest, settings)):

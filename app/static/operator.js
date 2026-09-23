@@ -3,13 +3,29 @@ let operatorPreferences = null;
 let csrfValue = "";
 let logCursors = {older: null, live: null};
 let presentationSave = Promise.resolve();
+const presentationDefaults = {};
 let recoveryReview = null;
 const updateState = {candidate: null, helper: null, saved: false, blob: null, receipt: "", filename: "", request: null, job: null, timer: null, delay: 1500, checking: false};
 
 async function refreshKernel() {
   const config = await api("/v1/settings/kernel");
   el("kernelOrigin").value = config.url;
-  el("kernelStatus").textContent = config.helper_sync_required ? "Kernel changed. Synchronize the host Updater before installing releases; see Documentation." : config.register_stale ? "Kernel is unavailable; the last valid Register is in use." : config.token_configured ? "Token configured. Check the authenticated connection." : "Kernel token has not been configured.";
+  el("kernelOrigin").dataset.confirmed = config.url;
+  el("kernelStatus").textContent = config.register_stale ? "Last known configuration" : config.token_configured ? "Checking reachability…" : "Not configured";
+  el("kernelReachability").dataset.status = "unknown";
+  el("kernelDetail").textContent = config.helper_sync_required ? "Synchronize the host Updater after this connection change; see Documentation." : "";
+  if (config.token_configured && !config.register_stale) {
+    try { await api("/v1/settings/kernel/check", {method: "POST", feedback: false}); el("kernelStatus").textContent = "Service reachable"; el("kernelReachability").dataset.status = "healthy"; }
+    catch (_) { el("kernelStatus").textContent = "Service unavailable"; el("kernelReachability").dataset.status = "failed"; }
+  }
+}
+async function commitKernelOrigin() {
+  const field = el("kernelOrigin");
+  if (field.disabled || field.value === field.dataset.confirmed) return;
+  field.disabled = true; el("kernelStatus").textContent = "Validating connection…";
+  try { await api("/v1/settings/kernel", {method: "PATCH", body: JSON.stringify({url: field.value})}); await refreshKernel(); }
+  catch (error) { field.value = field.dataset.confirmed || ""; el("kernelStatus").textContent = "Previous connection retained"; el("kernelDetail").textContent = error.message; notify(error.message, "error"); }
+  finally { field.disabled = false; }
 }
 function closeKernelToken() { el("kernelTokenBackdrop").classList.remove("open"); el("kernelTokenBackdrop").setAttribute("aria-hidden", "true"); el("kernelCurrentKey").value = ""; el("kernelNewToken").value = ""; }
 async function rotateKernelToken() {
@@ -48,7 +64,8 @@ function applyPresentation() {
   const scopes = {navigation: [".nav", "data-view"], dashboard: [".dashboard-metrics", "data-metric-id"], settings: [".settings-grid", "data-setting-id"]};
   for (const [scope, [parent, attribute]] of Object.entries(scopes)) {
     const container = document.querySelector(parent);
-    for (const id of operatorPreferences.layout[scope] || []) {
+    const ordered = [...new Set([...(operatorPreferences.layout[scope] || []), ...(presentationDefaults[scope] || [])])];
+    for (const id of ordered) {
       const item = container.querySelector(`[${attribute}="${CSS.escape(id)}"]`);
       if (item) container.appendChild(item);
     }
@@ -73,17 +90,21 @@ function savePresentation(change) {
   return presentationSave;
 }
 function previewAccent(value) {
+  if (!/^#[0-9a-f]{6}$/i.test(value)) { el("accentHex").setCustomValidity("Use a complete six-digit hex color, for example #00A8FF."); return; }
+  const rgb = value.slice(1).match(/../g).map(channel => { const c = parseInt(channel, 16) / 255; return c <= .04045 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4; });
+  if ((rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722 + .05) / .05 < 4.5) { el("accentHex").setCustomValidity("Choose a brighter accent with at least 4.5:1 contrast against black."); return; }
+  el("accentHex").setCustomValidity("");
   el("accentHex").value = value.toUpperCase();
-  if (!/^#[0-9a-f]{6}$/i.test(value)) return;
   el("colorAccent").value = value;
   document.documentElement.style.setProperty("--accent", value);
   if (graphState.canvas) { syncCorrelationControls(); drawCorrelationGraph(); }
 }
 async function applyTheme() {
+  if (!el("accentHex").reportValidity()) return;
   await savePresentation({theme: {accent: el("accentHex").value}});
   notify("Accent saved.", "success");
 }
-function persistOrder(scope, order) { savePresentation({layout: {[scope]: order}}).then(() => notify("Order saved.", "success")).catch(() => {}); }
+function persistOrder(scope, order) { updateNavNumbers(); savePresentation({layout: {[scope]: order}}).then(() => notify("Order saved.", "success")).catch(() => {}); }
 async function changePassword() {
   const result = await api("/v1/settings/access-key", {method: "POST", body: JSON.stringify({
     current_key: readOpaqueKey(el("currentPassword")), new_key: readOpaqueKey(el("newPassword")), confirm_key: readOpaqueKey(el("confirmPassword"))
@@ -120,7 +141,10 @@ async function confirmRestore() {
 }
 function renderUpdaterRuntime() {
   const runtime = state.updaterRuntime;
-  el("updaterAvailability").textContent = runtime?.available ? `Updater ${runtime.version || "unknown"} · ${runtime.compatible ? "ready" : "protocol upgrade required"}` : "Updater is unreachable. Check its host service before installation.";
+  el("updaterAvailability").textContent = runtime?.available ? runtime.compatible ? "Service reachable" : "Protocol upgrade required" : "Service unavailable";
+  el("updaterStatusRow").dataset.status = runtime?.available && runtime.compatible ? "healthy" : "failed";
+  el("installedAppVersion").textContent = state.runtime?.version || "Unknown";
+  el("installedHelperVersion").textContent = runtime?.version || "Unavailable";
 }
 function revealUpdates() {
   resetModalPosition("updateInstallModalBackdrop");
@@ -133,11 +157,16 @@ function closeUpdateInstallModal() {
   el("updateInstallModalBackdrop").setAttribute("aria-hidden", "true");
   // Closing the view never cancels an accepted host operation.
 }
-async function checkForUpdates(open = true) {
+async function checkForUpdates(open = true, component = updateState.component || "perimetr") {
+  updateState.component = component;
+  el("updateInstallModalTitle").textContent = component === "updater" ? "Updater updates" : "Updates";
   if (open) revealUpdates();
+  if (updateState.job && !terminalJob(updateState.job)) { renderUpdateJob(updateState.job); return; }
   if (updateState.checking) return;
   updateState.checking = true;
   el("discoveryText").textContent = "Checking for updates…";
+  el("discoveryDetail").textContent = "";
+  el("releaseNotes").hidden = true;
   el("updateRegistry").textContent = "Checking…";
   el("checkUpdatesAgain").disabled = true;
   el("installUpdate").hidden = true;
@@ -149,20 +178,26 @@ async function checkForUpdates(open = true) {
     renderUpdaterRuntime();
     updateState.candidate = appResult.status === "fulfilled" ? appResult.value : null;
     updateState.helper = helperResult.status === "fulfilled" ? helperResult.value : null;
-    const candidate = updateState.candidate;
-    el("updateInstalled").textContent = candidate?.installed_version || state.runtime?.version || "Unknown";
+    const candidate = component === "updater" ? updateState.helper : updateState.candidate;
+    el("updateInstalled").textContent = candidate?.installed_version || (component === "updater" ? state.updaterRuntime?.version : state.runtime?.version) || "Unknown";
     el("updateHelper").textContent = state.updaterRuntime?.available ? `${state.updaterRuntime.version} · ${updateState.helper?.update_available ? `available ${updateState.helper.available_version}` : helperResult.status === "fulfilled" ? "current" : "discovery unavailable"}` : "Unreachable";
     el("updateRegistry").textContent = candidate ? candidate.registry || "Checked" : "Unavailable";
-    if (!candidate) throw appResult.reason;
-    el("discoveryText").textContent = candidate.update_available ? `Perimetr ${candidate.available_version} is available. The helper verifies the signed artifact and health during installation.` : "No newer stable Perimetr release is available.";
+    el("registryAvailability").textContent = candidate ? "Verified release discovery" : "Discovery unavailable";
+    el("registryStatusRow").dataset.status = candidate ? "healthy" : "failed";
+    if (!candidate) throw (component === "updater" ? helperResult : appResult).reason;
+    const name = component === "updater" ? "Updater" : "Perimetr";
+    el("discoveryText").textContent = candidate.update_available ? `${name} ${candidate.available_version} is available.` : `No newer stable ${name} release is available.`;
+    el("discoveryDetail").textContent = "Release identity and version are checked here. Signed artifacts and service health are verified by the local update helper during installation.";
     const link = el("releaseNotes");
     const safeRelease = /^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\//.test(candidate.release_url || "");
     link.hidden = !safeRelease;
     if (safeRelease) link.href = candidate.release_url;
     const active = updateState.job && !terminalJob(updateState.job);
-    el("installUpdate").hidden = !candidate.update_available || active;
+    el("installUpdate").hidden = component !== "perimetr" || !candidate.update_available || active;
+    el("installUpdate").textContent = `Install ${candidate.available_version || "update"}`;
     el("installUpdate").disabled = !state.updaterRuntime?.compatible;
-    el("installHelperUpdate").hidden = !updateState.helper?.update_available || active;
+    el("installHelperUpdate").hidden = component !== "updater" || !candidate.update_available || active;
+    el("installHelperUpdate").textContent = `Install Updater ${candidate.available_version || "update"}`;
   } catch (error) {
     el("discoveryText").textContent = error?.message || "Discovery is unavailable. Check the Kernel connection and Updater.";
   } finally {
@@ -175,6 +210,9 @@ function openUpdateInstallModal() {
   if (!updateState.candidate?.update_available) return;
   updateState.saved = false; updateState.blob = null; updateState.receipt = "";
   updateState.request = {request_id: crypto.randomUUID(), version: updateState.candidate.available_version, component: "perimetr"};
+  el("updateTargetQuestion").textContent = `Install Perimetr ${updateState.candidate.available_version}?`;
+  el("confirmInstallUpdate").textContent = `Install ${updateState.candidate.available_version}`;
+  el("confirmInstallUpdate").classList.add("danger");
   el("updateWarning").hidden = false;
   resetModalPosition("updateWarningBackdrop");
   el("updateWarningBackdrop").classList.add("open");
@@ -252,6 +290,13 @@ async function installUpdate() {
 }
 function terminalJob(job) { return ["COMPLETED", "SUCCEEDED", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED", "INTERRUPTED", "CANCELLED"].includes(job.state); }
 function renderUpdateJob(job) {
+  el("updateJobPanel").hidden = false;
+  el("updateJobId").textContent = job.id || "Accepted";
+  el("updateJobState").textContent = job.state;
+  el("updateJobState").style.color = ["COMPLETED", "SUCCEEDED"].includes(job.state) ? "var(--success)" : terminalJob(job) ? "var(--danger)" : "var(--white)";
+  el("checkUpdatesAgain").disabled = !terminalJob(job);
+  el("installUpdate").hidden = true;
+  el("installHelperUpdate").hidden = true;
   updateState.job = job;
   updateState.request = {...updateState.request, request_id: job.request_id, job_id: job.id, version: job.version};
   retainUpdateRequest();
@@ -261,7 +306,10 @@ function renderUpdateJob(job) {
   progress.classList.toggle("measured", measured);
   if (measured) { const percent = Math.max(0, Math.min(100, job.progress.completed * 100 / job.progress.total)); progress.setAttribute("aria-valuenow", percent); progress.firstElementChild.style.width = `${percent}%`; }
   else { progress.removeAttribute("aria-valuenow"); progress.firstElementChild.style.width = "35%"; }
+  el("updateProgressLabel").textContent = measured ? `${job.progress.completed} / ${job.progress.total}${job.progress.unit ? " " + job.progress.unit : ""}` : job.progress?.label || "Operation in progress";
+  progress.setAttribute("aria-valuetext", el("updateProgressLabel").textContent);
   const terminal = terminalJob(job);
+  el("updateProgressLabel").hidden = terminal;
   if (terminal) { progress.hidden = true; el("confirmInstallUpdate").hidden = true; }
   const rollback = terminal && job.rollback_available;
   el("rollbackLabel").hidden = !rollback; el("rollbackUpdate").hidden = !rollback;
@@ -313,71 +361,129 @@ async function loadLogPage(older = false) {
   el("olderLogs").disabled = older && !result.has_more;
 }
 
+function syncDocumentationCurrent() {
+  const content = document.querySelector(".documentation-content");
+  const articles = [...content.querySelectorAll("article:not([hidden])")];
+  const threshold = content.getBoundingClientRect().top + 31;
+  const atEnd = content.scrollHeight > content.clientHeight && content.scrollTop + content.clientHeight >= content.scrollHeight - 2;
+  const active = atEnd ? articles.at(-1) : articles.filter(article => article.getBoundingClientRect().top <= threshold).at(-1) || articles[0];
+  document.querySelectorAll(".documentation-nav a").forEach(link => {
+    const current = link.hash === `#${active?.id}` && !link.hidden;
+    link.classList.toggle("active", current);
+    if (current) link.setAttribute("aria-current", "location"); else link.removeAttribute("aria-current");
+  });
+}
+const crossIcon = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>';
 function enhanceSearch() {
   const icon = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5"/></svg>';
   document.querySelectorAll('input[type="search"],#documentationSearch').forEach(input => {
     let wrapper = input.closest(".library-search");
-    if (!wrapper) { wrapper = document.createElement("label"); wrapper.className = "search-control"; input.before(wrapper); wrapper.append(input); }
-    wrapper.querySelector("span")?.remove();
-    wrapper.insertAdjacentHTML("afterbegin", icon);
-    const clear = document.createElement("button"); clear.type = "button"; clear.className = "search-clear empty"; clear.textContent = "×"; clear.setAttribute("aria-label", "Clear search"); wrapper.append(clear);
-    input.addEventListener("input", () => clear.classList.toggle("empty", !input.value));
-    clear.addEventListener("click", () => { input.value = ""; input.dispatchEvent(new Event("input", {bubbles: true})); input.focus(); if (input.id === "documentationSearch") document.querySelector(".documentation-content").scrollTop = 0; });
+    if (!wrapper) { wrapper = document.createElement("div"); wrapper.className = "search-control"; input.before(wrapper); wrapper.append(input); }
+    wrapper.querySelector("span")?.remove(); wrapper.insertAdjacentHTML("afterbegin", icon);
+    const clear = document.createElement("button"); clear.type = "button"; clear.className = "search-clear empty"; clear.innerHTML = crossIcon; clear.setAttribute("aria-label", "Clear search"); wrapper.append(clear);
+    const update = () => { const empty = !input.value; clear.classList.toggle("empty", empty); clear.disabled = empty; clear.tabIndex = empty ? -1 : 0; clear.setAttribute("aria-hidden", String(empty)); };
+    const reset = () => { input.value = ""; input.dispatchEvent(new Event("input", {bubbles: true})); requestAnimationFrame(() => input.focus()); };
+    input.addEventListener("input", update); clear.addEventListener("click", reset); update();
+    input.addEventListener("keydown", event => { if (event.key === "Escape" && input.value) { event.preventDefault(); event.stopPropagation(); reset(); } });
   });
-  const content = document.querySelector(".documentation-content");
+  const content = document.querySelector(".documentation-content"), nav = document.querySelector(".documentation-nav");
+  content.tabIndex = 0; content.setAttribute("role", "region"); content.setAttribute("aria-label", "Operator guide articles"); nav.setAttribute("aria-label", "Documentation navigation");
   document.querySelectorAll(".documentation-nav a").forEach(link => link.addEventListener("click", event => {
-    event.preventDefault(); const article = document.querySelector(link.getAttribute("href"));
-    if (article) content.scrollTo({top: article.offsetTop - content.offsetTop - 30, behavior: "instant"});
+    event.preventDefault(); const article = document.querySelector(link.hash);
+    if (article) content.scrollTo({top: content.scrollTop + article.getBoundingClientRect().top - content.getBoundingClientRect().top - 30, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth"});
   }));
-  content.addEventListener("scroll", () => {
-    const threshold = content.getBoundingClientRect().top + 31;
-    const articles = [...content.querySelectorAll("article:not([hidden])")];
-    const active = articles.filter(article => article.getBoundingClientRect().top <= threshold).at(-1) || articles[0];
-    document.querySelectorAll(".documentation-nav a").forEach(link => link.classList.toggle("active", link.hash === `#${active?.id}`));
-  });
+  content.addEventListener("scroll", syncDocumentationCurrent); new ResizeObserver(syncDocumentationCurrent).observe(content); syncDocumentationCurrent();
 }
+
 function enhanceOrdering() {
-  const cards = document.querySelectorAll(".settings-card");
-  cards.forEach((card, index) => card.dataset.settingId = ["appearance", "security", "backup", "updates", "logs"][index]);
-  const scopes = [["settings", ".settings-card", "settingId"], ["dashboard", ".metric", "metricId"], ["navigation", ".nav>button", "view"]];
-  for (const [scope, selector, key] of scopes) {
-    for (const item of document.querySelectorAll(selector)) {
-      item.tabIndex = 0;
-      item.setAttribute("aria-description", "Hold Alt and press Up or Down to reorder");
-      if (scope === "settings") {
-        const handle = document.createElement("button"); handle.className = "order-handle"; handle.textContent = "⠿"; handle.draggable = true; handle.setAttribute("aria-label", `Reorder ${item.dataset[key]}`); item.append(handle);
-        handle.addEventListener("dragstart", event => event.dataTransfer.setData("text/perimetr-setting", item.dataset[key]));
-        item.addEventListener("dragover", event => event.preventDefault());
-        item.addEventListener("drop", event => { const id = event.dataTransfer.getData("text/perimetr-setting"); const source = document.querySelector(`[data-setting-id="${CSS.escape(id)}"]`); if (!source || source === item) return; event.preventDefault(); item.before(source); persistOrder(scope, [...item.parentElement.children].map(node => node.dataset[key])); });
+  document.querySelectorAll(".settings-card").forEach((card, index) => card.dataset.settingId = ["appearance", "security", "backup", "updates", "logs"][index]);
+  const dots = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="4.5" cy="4.5" r="1.5"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="4.5" cy="10.5" r="1.5"/><circle cx="10.5" cy="10.5" r="1.5"/></svg>';
+  for (const [scope, selector, key] of [["settings", ".settings-card", "settingId"], ["dashboard", ".metric", "metricId"], ["navigation", ".nav>button", "view"]]) {
+    const items = [...document.querySelectorAll(selector)], container = items[0].parentElement;
+    presentationDefaults[scope] = items.map(node => node.dataset[key]);
+    let drag = null;
+    const finish = commit => {
+      if (!drag) return;
+      const {source, placeholder, original} = drag;
+      if (commit) placeholder.before(source); else original.forEach(node => container.append(node));
+      for (const property of ["position", "left", "top", "width", "height", "z-index", "pointer-events", "transform"]) source.style.removeProperty(property);
+      source.classList.remove("dragging"); placeholder.remove(); drag = null;
+      if (commit) persistOrder(scope, [...container.querySelectorAll(selector)].map(node => node.dataset[key]));
+    };
+    for (const item of items) {
+      item.tabIndex = 0; item.setAttribute("aria-description", "Hold Alt and press Up or Down to reorder");
+      if (scope !== "navigation") {
+        item.draggable = false;
+        const handle = document.createElement("button"); handle.className = "order-handle"; handle.innerHTML = dots; handle.setAttribute("aria-label", `Reorder ${item.querySelector("h2").textContent}`); item.append(handle);
+        let pointer = null;
+        handle.addEventListener("pointerdown", event => {
+          if (event.button !== 0) return;
+          pointer = {id: event.pointerId, x: event.clientX, y: event.clientY, rect: item.getBoundingClientRect()};
+          handle.setPointerCapture(event.pointerId); event.stopPropagation();
+        });
+        handle.addEventListener("pointermove", event => {
+          if (!pointer || pointer.id !== event.pointerId) return;
+          if (!drag && Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
+          event.preventDefault();
+          if (!drag) {
+            const placeholder = document.createElement("div"); placeholder.className = "card-placeholder"; placeholder.style.height = `${item.offsetHeight}px`; placeholder.style.gridColumn = getComputedStyle(item).gridColumn;
+            drag = {source: item, placeholder, original: [...container.children]};
+            item.before(placeholder); item.classList.add("dragging");
+            Object.assign(item.style, {position:"fixed",width:`${item.offsetWidth}px`,height:`${item.offsetHeight}px`,zIndex:"135",pointerEvents:"none",transform:"none"});
+          }
+          item.style.left = `${pointer.rect.left + event.clientX - pointer.x}px`; item.style.top = `${pointer.rect.top + event.clientY - pointer.y}px`;
+          const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(selector);
+          if (!target || target === item || !container.contains(target)) return;
+          const rect = target.getBoundingClientRect(), sideBySide = scope === "dashboard" && rect.width < container.clientWidth * .75;
+          const after = sideBySide ? event.clientX > rect.left + rect.width / 2 : event.clientY > rect.top + rect.height / 2;
+          if (after) target.after(drag.placeholder); else target.before(drag.placeholder);
+        });
+        handle.addEventListener("pointerup", event => {
+          if (!pointer || pointer.id !== event.pointerId) return;
+          const bounds = container.getBoundingClientRect();
+          const within = event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+          finish(within); pointer = null; handle.releasePointerCapture(event.pointerId); handle.focus();
+        });
+        handle.addEventListener("pointercancel", () => {finish(false); pointer = null;});
+        handle.addEventListener("keydown", event => {if (event.key === "Escape" && drag) {event.preventDefault(); finish(false); pointer = null;}});
       }
       item.addEventListener("keydown", event => {
         if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
-        event.preventDefault();
-        const sibling = event.key === "ArrowUp" ? item.previousElementSibling : item.nextElementSibling;
-        if (!sibling) return;
+        event.preventDefault(); event.stopPropagation(); const sibling = event.key === "ArrowUp" ? item.previousElementSibling : item.nextElementSibling; if (!sibling) return;
         if (event.key === "ArrowUp") sibling.before(item); else sibling.after(item);
-        item.focus(); persistOrder(scope, [...item.parentElement.children].map(node => node.dataset[key]));
+        item.focus(); persistOrder(scope, [...container.children].map(node => node.dataset[key]));
+        notify(`${item.querySelector("h2,span")?.textContent || "Item"} moved to position ${[...container.children].indexOf(item) + 1}.`, "info");
       });
     }
   }
 }
+
 function enhanceDialogs() {
   document.addEventListener("keydown", event => {
     const opened = [...document.querySelectorAll(".modal-backdrop.open")].at(-1);
     if (!opened) return;
-    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeBackdrop(opened); }
+    if (event.key === "Escape") { if (document.activeElement?.type === "search" && document.activeElement.value) return; event.preventDefault(); event.stopPropagation(); closeBackdrop(opened); }
     if (event.key === "Tab" && !opened.contains(document.activeElement)) {
       event.preventDefault(); opened.querySelector('button:not(:disabled),input:not(:disabled)')?.focus();
     }
   }, true);
   const returnFocus = new WeakMap();
+  const syncInert = () => {
+    const opened = [...document.querySelectorAll(".modal-backdrop.open")], top = opened.at(-1);
+    document.querySelectorAll(".app,.sidebar").forEach(node => node.inert = Boolean(top));
+    opened.forEach(node => node.inert = node !== top);
+    document.querySelectorAll(".modal-backdrop:not(.open)").forEach(node => node.inert = false);
+  };
   document.querySelectorAll(".modal-backdrop").forEach(backdrop => {
     let wasOpen = false;
     new MutationObserver(() => {
-      const open = backdrop.classList.contains("open"); if (open === wasOpen) return; wasOpen = open;
+      const open = backdrop.classList.contains("open"); if (open === wasOpen) return; wasOpen = open; syncInert();
+      backdrop.dataset.dirty = "false";
       if (open) { returnFocus.set(backdrop, document.activeElement); backdrop.querySelector('input:not([type=hidden]),button,[tabindex="0"]')?.focus(); }
       else { backdrop.querySelectorAll('input[type=password]').forEach(clearOpaqueKey); returnFocus.get(backdrop)?.focus(); }
     }).observe(backdrop, {attributes: true, attributeFilter: ["class"]});
+    backdrop.addEventListener("input", () => backdrop.dataset.dirty = "true");
+    backdrop.addEventListener("change", () => backdrop.dataset.dirty = "true");
     backdrop.addEventListener("keydown", event => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeBackdrop(backdrop); return; }
       if (event.key !== "Tab") return;
@@ -395,7 +501,7 @@ el("sidebarAuto").addEventListener("change", event => savePresentation({sidebar:
 el("operatorSaved").addEventListener("change", event => { updateState.saved = Boolean(updateState.blob && event.target.checked); el("confirmInstallUpdate").disabled = !updateState.saved; });
 el("backupImportFile").addEventListener("change", () => { recoveryReview = null; el("confirmRestore").hidden = true; el("restoreSummary").textContent = ""; });
 const operatorActions = {cancelUpdatePreparation, toggleSidebar: () => { const open = document.body.classList.toggle("mobile-nav-open"); el("toggleSidebar").setAttribute("aria-expanded", String(open)); }, signOut: async () => { await api("/v1/auth/logout", {method: "POST"}); location.assign("/"); }, confirmRestore, saveUpdateBackup, checkUpdatesAgain: checkForUpdates, installHelperUpdate, reconnectUpdate: pollUpdate, rollbackUpdate, olderLogs: () => loadLogPage(true),
-  saveKernelOrigin: async () => { await api("/v1/settings/kernel", {method: "PATCH", body: JSON.stringify({url: el("kernelOrigin").value})}); await refreshKernel(); },
+  checkHelperUpdates: () => checkForUpdates(true, "updater"),
   checkKernel: async () => { el("kernelStatus").textContent = "Checking authenticated connection…"; try { await api("/v1/settings/kernel/check", {method: "POST"}); el("kernelStatus").textContent = "Kernel is reachable and authenticated."; } catch (error) { el("kernelStatus").textContent = error.message; } },
   openKernelToken: () => { el("kernelCurrentKey").value = ""; el("kernelNewToken").value = ""; el("kernelTokenBackdrop").classList.add("open"); el("kernelTokenBackdrop").setAttribute("aria-hidden", "false"); }, closeKernelToken, rotateKernelToken};
 document.addEventListener("click", async event => {
@@ -410,9 +516,36 @@ async function initializeOperator() {
   document.body.append(warningBackdrop);
   const warning = el("updateWarning"); warning.classList.add("settings-modal"); warning.setAttribute("role", "alertdialog"); warning.setAttribute("aria-modal", "true"); warning.setAttribute("aria-label", "Save your recovery copy");
   warningBackdrop.append(warning);
-  const footer = document.createElement("div"); footer.className = "actions"; footer.innerHTML = '<button id="cancelUpdatePreparation">Cancel</button>'; footer.append(el("confirmInstallUpdate")); warning.append(footer);
+  const warningBody = document.createElement("div"); warningBody.className = "warning-body";
+  while (warning.firstChild) warningBody.append(warning.firstChild);
+  warningBody.querySelector("h3").remove();
+  warning.insertAdjacentHTML("afterbegin", '<div class="modal-head"><h2>Install Perimetr update</h2><button id="closeUpdateWarning" class="close-panel" aria-label="Close backup warning">' + crossIcon + '</button></div>');
+  warningBody.insertAdjacentHTML("afterbegin", '<p id="updateTargetQuestion" class="warning-question"></p>');
+  warning.append(warningBody);
+  el("closeUpdateWarning").addEventListener("click", cancelUpdatePreparation);
+  const footer = document.createElement("div"); footer.className = "actions"; footer.innerHTML = '<button id="cancelUpdatePreparation">Cancel</button>'; footer.append(el("confirmInstallUpdate")); warningBody.append(footer);
   const menu = document.createElement("button"); menu.id = "toggleSidebar"; menu.textContent = "☰"; menu.setAttribute("aria-label", "Toggle navigation"); menu.setAttribute("aria-expanded", "false"); menu.setAttribute("aria-controls", "perimetrSidebar"); document.querySelector(".sidebar").id = "perimetrSidebar"; document.querySelector(".top").prepend(menu);
-  document.querySelectorAll("button[data-view]").forEach(button => button.addEventListener("click", () => { document.body.classList.remove("mobile-nav-open"); menu.setAttribute("aria-expanded", "false"); if (innerWidth <= 760) { button.blur(); el(button.dataset.view).scrollTop = 0; } }));
+  document.querySelectorAll("button[data-view]").forEach(button => button.addEventListener("click", () => { document.body.classList.remove("mobile-nav-open"); menu.setAttribute("aria-expanded", "false"); if (innerWidth <= 720) { button.blur(); el(button.dataset.view).scrollTop = 0; } }));
+  document.querySelectorAll(".close-panel").forEach(button => button.innerHTML = crossIcon);
+  el("kernelOrigin").addEventListener("blur", commitKernelOrigin);
+  el("kernelOrigin").addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); commitKernelOrigin(); } });
+  for (const [id, label, action, text] of [["pods", "Pods", null, null], ["properties", "Properties", "data-add-library-property", "Add Property"]]) {
+    const page = document.querySelector(`#${id} .library-page`), bar = document.createElement("div"); bar.className = "collection-command-bar"; bar.setAttribute("role", "region"); bar.setAttribute("aria-label", `${label} collection controls`);
+    bar.append(page.querySelector(".library-search")); bar.insertAdjacentHTML("beforeend", `<div class="collection-info">${label}<strong id="${id}Count" aria-live="polite">Loading…</strong></div>`);
+    if (action) { const button = page.querySelector(`[${action}]`); button.textContent = text; bar.append(button); }
+    page.prepend(bar);
+  }
+  const updateJob = document.createElement("section"); updateJob.id = "updateJobPanel"; updateJob.className = "update-job"; updateJob.hidden = true;
+  updateJob.innerHTML = '<dl class="update-metadata"><dt>Job</dt><dd id="updateJobId"></dd><dt>State</dt><dd id="updateJobState"></dd></dl>';
+  for (const id of ["updateJobMessage", "updateProgress", "reconnectUpdate", "rollbackLabel", "rollbackUpdate"]) updateJob.append(el(id));
+  updateJob.querySelector("#updateProgress").insertAdjacentHTML("afterend", '<p id="updateProgressLabel" class="hint"></p>');
+  document.querySelector(".updates-body").append(updateJob);
+  for (const name of ["pointerover", "focusin"]) document.addEventListener(name, event => {
+    const item = event.target.closest?.(".metric,.search-control,.library-search,button,input,select,textarea"); if (!item || item.classList.contains("order-handle")) return;
+    applySafeHoverScale(item);
+    const rect = item.getBoundingClientRect(), parent = item.closest(".dashboard-metrics,.settings-grid,.view")?.getBoundingClientRect();
+    if (parent) item.style.transformOrigin = `${rect.left - parent.left < 12 ? "left" : parent.right - rect.right < 12 ? "right" : "center"} ${rect.top - parent.top < 12 ? "top" : "center"}`;
+  });
   enhanceSearch(); enhanceOrdering(); enhanceDialogs();
   const session = await api("/v1/auth/session"); csrfValue = session.csrf_token;
   operatorPreferences = await api("/v1/settings/preferences");
@@ -434,6 +567,6 @@ async function initializeOperator() {
   try { updateState.request = JSON.parse(localStorage.getItem("perimetr.updateOperation") || "null"); } catch (_) {}
   if (updateState.request) pollUpdate();
   setInterval(() => { if (!document.hidden) api("/v1/system/metrics").then(metrics => {state.metrics = metrics; renderMetrics();}).catch(() => {}); }, 2000);
-  setInterval(() => { if (!document.hidden) { refreshPendingApprovals().catch(() => {}); if (el("settings").classList.contains("active")) loadLogPage().catch(() => {}); } }, 3000);
+  setInterval(() => { if (!document.hidden) { if (el("settings").classList.contains("active")) loadLogPage().catch(() => {}); } }, 3000);
 }
 initializeOperator().catch(error => notify(error.message, "error"));
