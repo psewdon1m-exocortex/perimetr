@@ -90,9 +90,11 @@ module.exports = async function verifyInterface(page, directory) {
   await visit('settings');
   await page.locator('.logger-card').scrollIntoViewIfNeeded();
   close((await box('.log-table')).height,460,'Bounded log table');
+  assert.ok((await box('.updates-card')).height < 500,'Updates card follows its remaining content');
   await page.screenshot({path:directory+'/reference-logs-1920.png'});
   // Real discovery is replaced only inside this UI fixture. No installation is sent.
-  await page.route('**/v1/updater/check*',route => route.fulfill({json:{installed_version:route.request().url().includes('component=updater')?'0.5.0':'2.0.0',available_version:route.request().url().includes('component=updater')?'0.5.1':'2.0.1',update_available:true,registry:'Checked',release_url:'https://github.com/psewdon1m-exocortex/perimetr/releases/tag/perimetr-v2.0.1'}}));
+  let helperReleaseRequests=0;
+  await page.route('**/v1/updater/check*',route => {if(route.request().url().includes('component=updater')) helperReleaseRequests++;return route.fulfill({json:{installed_version:'2.0.0',available_version:'2.0.1',update_available:true,registry:'Checked',release_url:'https://github.com/psewdon1m-exocortex/perimetr/releases/tag/perimetr-v2.0.1'}});});
   await page.route('**/v1/updater/status',route=>route.fulfill({json:{available:true,compatible:true,version:'0.5.0'}}));
   await page.locator('#checkForUpdates').click(); await page.locator('#installUpdate').waitFor({state:'visible'});
   const dialog = await box('.update-install-modal'), discovery = await box('.update-discovery');
@@ -104,9 +106,11 @@ module.exports = async function verifyInterface(page, directory) {
   assert.equal(await page.locator('#confirmInstallUpdate').isDisabled(),true);
   await page.screenshot({path:directory+'/reference-update-warning.png'});
   await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
-  await page.locator('#checkHelperUpdates').click(); await page.locator('#installHelperUpdate').waitFor({state:'visible'});
-  assert.equal(await page.locator('#updateInstalled').textContent(),'0.5.0');
-  assert.equal(await page.locator('#installUpdate').isVisible(),false); await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#checkHelperUpdates').count(),0);
+  assert.equal(await page.locator('#installedHelperVersion').count(),0);
+  assert.equal(helperReleaseRequests,0);
+  assert.equal(await page.locator('#updateInstallModalBackdrop').getAttribute('aria-hidden'),'true');
+  assert.equal(await page.locator('#installHelperUpdate').count(),0);
   // Additional component states are render fixtures, never calls to a real host job.
   await page.locator('#checkForUpdates').click();
   await page.waitForFunction(() => !updateState.checking);

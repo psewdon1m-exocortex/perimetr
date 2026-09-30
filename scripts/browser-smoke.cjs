@@ -83,7 +83,7 @@ const assert = require('node:assert/strict');
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     assert.deepEqual(errors,[]);
     assert.deepEqual(retiredRequests,[], 'Removed control-plane endpoints must never be polled');
-    console.log(JSON.stringify({result:'PASS',checks:['exact-key login and reference geometry','1920px reference component measurements','persisted keyboard reorder','accent preview cancellation and contrast','modal focus/secret clearing/backdrop protection','documentation full-text/clear/current section/independent scroll','collection search/count/actions','bounded log columns','update dimensions/save gate/helper scope','1919px to 360px responsive layouts and short viewport','hidden sidebar and reduced motion'],screenshots:directory}));
+    console.log(JSON.stringify({result:'PASS',checks:['exact-key login and reference geometry','1920px reference component measurements','persisted keyboard reorder','accent preview cancellation and contrast','modal focus/secret clearing/backdrop protection','documentation full-text/clear/current section/independent scroll','collection search/count/actions','bounded log columns','update dimensions/save gate/Updater TUI boundary','1919px to 360px responsive layouts and short viewport','hidden sidebar and reduced motion'],screenshots:directory}));
   } finally {
     if(browser) await browser.close();
     server.kill();

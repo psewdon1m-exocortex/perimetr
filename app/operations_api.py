@@ -126,6 +126,8 @@ def register(app, require_access):
 
     @router.post("/v1/updater/check")
     def check_update(component: str = Query("perimetr", pattern="^(perimetr|updater)$"), db: Session = Depends(get_db)):
+        if component == "updater":
+            raise HTTPException(403, "Check Updater releases with sudo updater tui on the host")
         require_synced_kernel(db)
         return call_helper("POST", "/v2/check", {"head_id": get_settings().updater_head_id, "component": component})
 
@@ -181,14 +183,8 @@ def register(app, require_access):
         return job
 
     @router.post("/v1/updater/component")
-    def update_helper(payload: dict, db: Session = Depends(get_db)):
-        require_synced_kernel(db)
-        request_id = require_id(str(payload.get("request_id", "")))
-        version = str(payload.get("version", ""))
-        if payload.get("component") != "updater":
-            raise HTTPException(422, "Unsupported Perimetr component")
-        return JSONResponse(call_helper("POST", "/v2/components/updater/updates", {
-            "head_id": get_settings().updater_head_id, "version": version, "request_id": request_id}), status_code=202)
+    def update_helper():
+        raise HTTPException(403, "Update Updater with sudo updater tui on the host")
 
     @router.post("/v1/updater/jobs/{job_id}/rollback")
     async def rollback(job_id: str, request: Request, x_backup_filename: str = Header()):

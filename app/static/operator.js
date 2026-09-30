@@ -5,7 +5,7 @@ let logCursors = {older: null, live: null};
 let presentationSave = Promise.resolve();
 const presentationDefaults = {};
 let recoveryReview = null;
-const updateState = {candidate: null, helper: null, saved: false, blob: null, receipt: "", filename: "", request: null, job: null, timer: null, delay: 1500, checking: false};
+const updateState = {candidate: null, saved: false, blob: null, receipt: "", filename: "", request: null, job: null, timer: null, delay: 1500, checking: false};
 
 async function refreshKernel() {
   const config = await api("/v1/settings/kernel");
@@ -144,7 +144,6 @@ function renderUpdaterRuntime() {
   el("updaterAvailability").textContent = runtime?.available ? runtime.compatible ? "Service reachable" : "Protocol upgrade required" : "Service unavailable";
   el("updaterStatusRow").dataset.status = runtime?.available && runtime.compatible ? "healthy" : "failed";
   el("installedAppVersion").textContent = state.runtime?.version || "Unknown";
-  el("installedHelperVersion").textContent = runtime?.version || "Unavailable";
 }
 function revealUpdates() {
   resetModalPosition("updateInstallModalBackdrop");
@@ -158,8 +157,9 @@ function closeUpdateInstallModal() {
   // Closing the view never cancels an accepted host operation.
 }
 async function checkForUpdates(open = true, component = updateState.component || "perimetr") {
-  updateState.component = component;
-  el("updateInstallModalTitle").textContent = component === "updater" ? "Updater updates" : "Updates";
+  if (component === "updater") { notify("Check and update Updater with sudo updater tui on the host.", "info"); return; }
+  updateState.component = "perimetr";
+  el("updateInstallModalTitle").textContent = "Updates";
   if (open) revealUpdates();
   if (updateState.job && !terminalJob(updateState.job)) { renderUpdateJob(updateState.job); return; }
   if (updateState.checking) return;
@@ -170,34 +170,29 @@ async function checkForUpdates(open = true, component = updateState.component ||
   el("updateRegistry").textContent = "Checking…";
   el("checkUpdatesAgain").disabled = true;
   el("installUpdate").hidden = true;
-  el("installHelperUpdate").hidden = true;
   try {
-    const results = await Promise.allSettled([api("/v1/updater/check", {method: "POST"}), api("/v1/updater/check?component=updater", {method: "POST"}), api("/v1/updater/status")]);
-    const [appResult, helperResult, runtimeResult] = results;
+    const results = await Promise.allSettled([api("/v1/updater/check", {method: "POST"}), api("/v1/updater/status")]);
+    const [appResult, runtimeResult] = results;
     if (runtimeResult.status === "fulfilled") state.updaterRuntime = runtimeResult.value;
     renderUpdaterRuntime();
     updateState.candidate = appResult.status === "fulfilled" ? appResult.value : null;
-    updateState.helper = helperResult.status === "fulfilled" ? helperResult.value : null;
-    const candidate = component === "updater" ? updateState.helper : updateState.candidate;
-    el("updateInstalled").textContent = candidate?.installed_version || (component === "updater" ? state.updaterRuntime?.version : state.runtime?.version) || "Unknown";
-    el("updateHelper").textContent = state.updaterRuntime?.available ? `${state.updaterRuntime.version} · ${updateState.helper?.update_available ? `available ${updateState.helper.available_version}` : helperResult.status === "fulfilled" ? "current" : "discovery unavailable"}` : "Unreachable";
+    const candidate = updateState.candidate;
+    el("updateInstalled").textContent = candidate?.installed_version || state.runtime?.version || "Unknown";
+    el("updateHelper").textContent = state.updaterRuntime?.available ? state.updaterRuntime.version : "Unreachable";
     el("updateRegistry").textContent = candidate ? candidate.registry || "Checked" : "Unavailable";
     el("registryAvailability").textContent = candidate ? "Verified release discovery" : "Discovery unavailable";
     el("registryStatusRow").dataset.status = candidate ? "healthy" : "failed";
-    if (!candidate) throw (component === "updater" ? helperResult : appResult).reason;
-    const name = component === "updater" ? "Updater" : "Perimetr";
-    el("discoveryText").textContent = candidate.update_available ? `${name} ${candidate.available_version} is available.` : `No newer stable ${name} release is available.`;
+    if (!candidate) throw appResult.reason;
+    el("discoveryText").textContent = candidate.update_available ? `Perimetr ${candidate.available_version} is available.` : "No newer stable Perimetr release is available.";
     el("discoveryDetail").textContent = "Release identity and version are checked here. Signed artifacts and service health are verified by the local update helper during installation.";
     const link = el("releaseNotes");
     const safeRelease = /^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\//.test(candidate.release_url || "");
     link.hidden = !safeRelease;
     if (safeRelease) link.href = candidate.release_url;
     const active = updateState.job && !terminalJob(updateState.job);
-    el("installUpdate").hidden = component !== "perimetr" || !candidate.update_available || active;
+    el("installUpdate").hidden = !candidate.update_available || active;
     el("installUpdate").textContent = `Install ${candidate.available_version || "update"}`;
     el("installUpdate").disabled = !state.updaterRuntime?.compatible;
-    el("installHelperUpdate").hidden = component !== "updater" || !candidate.update_available || active;
-    el("installHelperUpdate").textContent = `Install Updater ${candidate.available_version || "update"}`;
   } catch (error) {
     el("discoveryText").textContent = error?.message || "Discovery is unavailable. Check the Kernel connection and Updater.";
   } finally {
@@ -296,7 +291,6 @@ function renderUpdateJob(job) {
   el("updateJobState").style.color = ["COMPLETED", "SUCCEEDED"].includes(job.state) ? "var(--success)" : terminalJob(job) ? "var(--danger)" : "var(--white)";
   el("checkUpdatesAgain").disabled = !terminalJob(job);
   el("installUpdate").hidden = true;
-  el("installHelperUpdate").hidden = true;
   updateState.job = job;
   updateState.request = {...updateState.request, request_id: job.request_id, job_id: job.id, version: job.version};
   retainUpdateRequest();
@@ -333,13 +327,6 @@ async function pollUpdate() {
     el("reconnectUpdate").hidden = false;
   }
   updateState.timer = setTimeout(pollUpdate, updateState.delay);
-}
-async function installHelperUpdate() {
-  if (!updateState.helper?.update_available) return;
-  updateState.request = {request_id: crypto.randomUUID(), version: updateState.helper.available_version, component: "updater"};
-  retainUpdateRequest();
-  const job = await api("/v1/updater/component", {method: "POST", body: JSON.stringify(updateState.request)});
-  renderUpdateJob(job); pollUpdate();
 }
 async function rollbackUpdate() {
   const file = el("rollbackFile").files?.[0];
@@ -500,8 +487,7 @@ el("accentHex").addEventListener("input", event => previewAccent(event.target.va
 el("sidebarAuto").addEventListener("change", event => savePresentation({sidebar: {auto_hide: event.target.checked}}).catch(() => {}));
 el("operatorSaved").addEventListener("change", event => { updateState.saved = Boolean(updateState.blob && event.target.checked); el("confirmInstallUpdate").disabled = !updateState.saved; });
 el("backupImportFile").addEventListener("change", () => { recoveryReview = null; el("confirmRestore").hidden = true; el("restoreSummary").textContent = ""; });
-const operatorActions = {cancelUpdatePreparation, toggleSidebar: () => { const open = document.body.classList.toggle("mobile-nav-open"); el("toggleSidebar").setAttribute("aria-expanded", String(open)); }, signOut: async () => { await api("/v1/auth/logout", {method: "POST"}); location.assign("/"); }, confirmRestore, saveUpdateBackup, checkUpdatesAgain: checkForUpdates, installHelperUpdate, reconnectUpdate: pollUpdate, rollbackUpdate, olderLogs: () => loadLogPage(true),
-  checkHelperUpdates: () => checkForUpdates(true, "updater"),
+const operatorActions = {cancelUpdatePreparation, toggleSidebar: () => { const open = document.body.classList.toggle("mobile-nav-open"); el("toggleSidebar").setAttribute("aria-expanded", String(open)); }, signOut: async () => { await api("/v1/auth/logout", {method: "POST"}); location.assign("/"); }, confirmRestore, saveUpdateBackup, checkUpdatesAgain: checkForUpdates, reconnectUpdate: pollUpdate, rollbackUpdate, olderLogs: () => loadLogPage(true),
   checkKernel: async () => { el("kernelStatus").textContent = "Checking authenticated connection…"; try { await api("/v1/settings/kernel/check", {method: "POST"}); el("kernelStatus").textContent = "Kernel is reachable and authenticated."; } catch (error) { el("kernelStatus").textContent = error.message; } },
   openKernelToken: () => { el("kernelCurrentKey").value = ""; el("kernelNewToken").value = ""; el("kernelTokenBackdrop").classList.add("open"); el("kernelTokenBackdrop").setAttribute("aria-hidden", "false"); }, closeKernelToken, rotateKernelToken};
 document.addEventListener("click", async event => {

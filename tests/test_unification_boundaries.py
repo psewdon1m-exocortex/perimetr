@@ -33,6 +33,16 @@ def script_module(name):
     return module
 
 
+def test_updater_release_actions_require_host_tui(operator_app):
+    application, _database = operator_app
+    client = TestClient(application)
+    sign_in(client, 'perimetr-entry-password')
+    assert client.post('/v1/updater/check?component=updater').status_code == 403
+    assert client.post('/v1/updater/component', json={
+        'component': 'updater', 'version': '1.2.3', 'request_id': 'test-updater-request-123',
+    }).status_code == 403
+
+
 def test_installer_preserves_exact_literal_seed_and_unrelated_multiline_data(tmp_path, monkeypatch):
     module = script_module('installer-env')
     path = tmp_path / '.env'
