@@ -37,8 +37,8 @@ After changing this connection, run `sudo perimetr-install sync-kernel` on the
 host before updating. This command changes only this service's Kernel fields.
 
 Updates use host Updater protocol 2. The interface opens immediately, reports
-the Perimetr version and local Updater reachability, saves a full ZIP and requires confirmed
-local persistence before install. Request identity survives page reload; the UI
+the Perimetr version and local Updater reachability, downloads a full ZIP and starts
+installation from the same action. Request identity survives page reload; the UI
 looks up the existing scoped job before retrying. Closing the dialog does not
 cancel installation. Rollback requires the original saved ZIP.
 

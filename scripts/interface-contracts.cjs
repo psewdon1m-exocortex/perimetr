@@ -103,7 +103,9 @@ module.exports = async function verifyInterface(page, directory) {
   await page.locator('#installUpdate').click();
   close((await box('#updateWarning')).width,620,'Warning width');
   assert.equal(await page.locator('#updateInstallModalBackdrop').evaluate(node=>node.inert),true);
-  assert.equal(await page.locator('#confirmInstallUpdate').isDisabled(),true);
+  assert.equal(await page.locator('#saveUpdateBackup').textContent(),'Create backup and install');
+  assert.equal(await page.locator('#confirmInstallUpdate').count(),0);
+  assert.equal(await page.locator('#operatorSaved').count(),0);
   await page.screenshot({path:directory+'/reference-update-warning.png'});
   await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
   assert.equal(await page.locator('#checkHelperUpdates').count(),0);

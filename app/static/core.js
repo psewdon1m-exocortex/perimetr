@@ -1468,7 +1468,6 @@
         if (target.id === "openImportBackupModal") openBackupImportModal();
         if (target.id === "closeBackupImportModal") closeBackupImportModal();
         if (target.id === "closeUpdateInstallModal" || target.id === "cancelInstallUpdate") closeUpdateInstallModal();
-        if (target.id === "confirmInstallUpdate") await installUpdate();
         if (target.dataset.addLibraryProperty) openPropertyModal("__library__");
         const libraryProperty = target.closest("[data-edit-library-property]");
         if (libraryProperty?.dataset.editLibraryProperty !== undefined) openPropertyModal("__library__", Number(libraryProperty.dataset.editLibraryProperty));

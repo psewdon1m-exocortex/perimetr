@@ -206,17 +206,12 @@ function openUpdateInstallModal() {
   updateState.saved = false; updateState.blob = null; updateState.receipt = "";
   updateState.request = {request_id: crypto.randomUUID(), version: updateState.candidate.available_version, component: "perimetr"};
   el("updateTargetQuestion").textContent = `Install Perimetr ${updateState.candidate.available_version}?`;
-  el("confirmInstallUpdate").textContent = `Install ${updateState.candidate.available_version}`;
-  el("confirmInstallUpdate").classList.add("danger");
+  el("saveUpdateBackup").textContent = "Create backup and install";
   el("updateWarning").hidden = false;
   resetModalPosition("updateWarningBackdrop");
   el("updateWarningBackdrop").classList.add("open");
   el("updateWarningBackdrop").setAttribute("aria-hidden", "false");
-  el("savedAcknowledgement").hidden = true;
-  el("operatorSaved").checked = false;
-  el("saveBackupStatus").textContent = "Save the ZIP to enable installation.";
-  el("confirmInstallUpdate").hidden = false;
-  el("confirmInstallUpdate").disabled = true;
+  el("saveBackupStatus").textContent = "";
   el("installUpdate").hidden = true;
 }
 function cancelUpdatePreparation() {
@@ -228,6 +223,7 @@ function cancelUpdatePreparation() {
 }
 async function saveUpdateBackup() {
   if (!updateState.request) return;
+  if (updateState.saved && updateState.blob) { await installUpdate(); return; }
   let handle = null;
   // The file chooser is opened in the click gesture, before any network await.
   if (window.showSaveFilePicker) {
@@ -241,18 +237,18 @@ async function saveUpdateBackup() {
     updateState.blob = await response.blob();
     updateState.receipt = response.headers.get("X-Backup-Receipt");
     updateState.filename = response.headers.get("X-Backup-Filename");
+    if (!el("updateWarningBackdrop").classList.contains("open")) { updateState.blob = null; updateState.receipt = ""; return; }
     if (handle) {
       const writable = await handle.createWritable();
       await writable.write(updateState.blob);
       await writable.close();
-      updateState.saved = true;
-      el("saveBackupStatus").textContent = "Backup saved. Keep it for recovery.";
     } else {
       downloadBlob(updateState.blob, updateState.filename);
-      el("savedAcknowledgement").hidden = false;
-      el("saveBackupStatus").textContent = "Wait for the download, verify it is saved, then tick the confirmation.";
     }
-    el("confirmInstallUpdate").disabled = !updateState.saved;
+    if (!el("updateWarningBackdrop").classList.contains("open")) { updateState.blob = null; updateState.receipt = ""; return; }
+    updateState.saved = true;
+    el("saveBackupStatus").textContent = "Backup download started. Starting update…";
+    await installUpdate();
   } catch (error) {
     updateState.saved = false; updateState.blob = null;
     el("saveBackupStatus").textContent = error.message;
@@ -267,7 +263,7 @@ async function lookupUpdate() {
 async function installUpdate() {
   if (!updateState.saved || !updateState.blob || !updateState.request) return;
   retainUpdateRequest(); // Persist identity before sending. No archive or secret is stored.
-  el("confirmInstallUpdate").disabled = true;
+  el("saveUpdateBackup").disabled = true;
   try {
     const existing = await lookupUpdate();
     const job = existing || await api(`/v1/updater/install?request_id=${encodeURIComponent(updateState.request.request_id)}&version=${encodeURIComponent(updateState.request.version)}`, {
@@ -280,7 +276,11 @@ async function installUpdate() {
     renderUpdateJob(job); pollUpdate();
   } catch (error) {
     el("updateJobMessage").textContent = `${error.message} Reconnect to check whether the request was accepted.`;
+    el("saveBackupStatus").textContent = `${error.message} Retry to check whether the request was accepted.`;
+    el("saveUpdateBackup").textContent = "Retry installation";
     el("reconnectUpdate").hidden = false;
+  } finally {
+    el("saveUpdateBackup").disabled = false;
   }
 }
 function terminalJob(job) { return ["COMPLETED", "SUCCEEDED", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED", "INTERRUPTED", "CANCELLED"].includes(job.state); }
@@ -304,7 +304,7 @@ function renderUpdateJob(job) {
   progress.setAttribute("aria-valuetext", el("updateProgressLabel").textContent);
   const terminal = terminalJob(job);
   el("updateProgressLabel").hidden = terminal;
-  if (terminal) { progress.hidden = true; el("confirmInstallUpdate").hidden = true; }
+  if (terminal) progress.hidden = true;
   const rollback = terminal && job.rollback_available;
   el("rollbackLabel").hidden = !rollback; el("rollbackUpdate").hidden = !rollback;
   el("reconnectUpdate").hidden = true;
@@ -485,7 +485,6 @@ function enhanceDialogs() {
 el("colorAccent").addEventListener("input", event => previewAccent(event.target.value));
 el("accentHex").addEventListener("input", event => previewAccent(event.target.value));
 el("sidebarAuto").addEventListener("change", event => savePresentation({sidebar: {auto_hide: event.target.checked}}).catch(() => {}));
-el("operatorSaved").addEventListener("change", event => { updateState.saved = Boolean(updateState.blob && event.target.checked); el("confirmInstallUpdate").disabled = !updateState.saved; });
 el("backupImportFile").addEventListener("change", () => { recoveryReview = null; el("confirmRestore").hidden = true; el("restoreSummary").textContent = ""; });
 const operatorActions = {cancelUpdatePreparation, toggleSidebar: () => { const open = document.body.classList.toggle("mobile-nav-open"); el("toggleSidebar").setAttribute("aria-expanded", String(open)); }, signOut: async () => { await api("/v1/auth/logout", {method: "POST"}); location.assign("/"); }, confirmRestore, saveUpdateBackup, checkUpdatesAgain: checkForUpdates, reconnectUpdate: pollUpdate, rollbackUpdate, olderLogs: () => loadLogPage(true),
   checkKernel: async () => { el("kernelStatus").textContent = "Checking authenticated connection…"; try { await api("/v1/settings/kernel/check", {method: "POST"}); el("kernelStatus").textContent = "Kernel is reachable and authenticated."; } catch (error) { el("kernelStatus").textContent = error.message; } },
@@ -509,7 +508,7 @@ async function initializeOperator() {
   warningBody.insertAdjacentHTML("afterbegin", '<p id="updateTargetQuestion" class="warning-question"></p>');
   warning.append(warningBody);
   el("closeUpdateWarning").addEventListener("click", cancelUpdatePreparation);
-  const footer = document.createElement("div"); footer.className = "actions"; footer.innerHTML = '<button id="cancelUpdatePreparation">Cancel</button>'; footer.append(el("confirmInstallUpdate")); warningBody.append(footer);
+  const footer = document.createElement("div"); footer.className = "actions"; footer.innerHTML = '<button id="cancelUpdatePreparation">Cancel</button>'; footer.append(el("saveUpdateBackup")); warningBody.append(footer);
   const menu = document.createElement("button"); menu.id = "toggleSidebar"; menu.textContent = "☰"; menu.setAttribute("aria-label", "Toggle navigation"); menu.setAttribute("aria-expanded", "false"); menu.setAttribute("aria-controls", "perimetrSidebar"); document.querySelector(".sidebar").id = "perimetrSidebar"; document.querySelector(".top").prepend(menu);
   document.querySelectorAll("button[data-view]").forEach(button => button.addEventListener("click", () => { document.body.classList.remove("mobile-nav-open"); menu.setAttribute("aria-expanded", "false"); if (innerWidth <= 720) { button.blur(); el(button.dataset.view).scrollTop = 0; } }));
   document.querySelectorAll(".close-panel").forEach(button => button.innerHTML = crossIcon);
