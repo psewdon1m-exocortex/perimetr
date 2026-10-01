@@ -13,7 +13,7 @@ Settings styling. The central specification remains authoritative.
 | Left Menu / shared shell | 250px sidebar, operator-provided transparent service icon, 42px service name, 42px navigation rows, 123px header, responsive 80px page title. Documentation and Logout are unnumbered text actions. |
 | Dashboard / universal cards | CPU, RAM, Disk and service Uptime occupy 790×166px cards at 1920px. A 1610px service correlation card follows. Ordinals, four-dot handles, 9px progress tracks and 30px gaps use the measured ledger. |
 | Settings main | 55px title bands, 401px baseline Appearance section, 40px controls, 326px action/hex fields, Kernel URL/status pair and full-width token action. Content grows for errors or narrow screens. |
-| Backup / Updates / Logs | Existing recovery actions keep their validation. Perimetr and Updater checks are separate; no unapproved service agent is added. Logs use bounded TYPE/BODY/TIME rows, archive download and older-page loading. |
+| Backup / Updates / Logs | Existing recovery actions keep their validation. Perimetr's Updates card checks only Perimetr releases; Updater self-update runs in `sudo updater tui`. No unapproved service agent is added. Logs use bounded TYPE/BODY/TIME rows, archive download and older-page loading. |
 | Documentation | 220px navigation, 30px gap, 1120px article maximum, two bounded scroll owners, full-text search and synchronized current-section state. |
 | Login | 560×268px panel, exact opaque key input, 100px service-icon box and independent reachability indicator. |
 | Update dialogs | 760×702px main overlay, 710×203px discovery panel, 620px warning, 55px title bands, measured progress and a separate job panel. No release is installed by discovery. |
